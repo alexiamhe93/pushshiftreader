@@ -362,6 +362,138 @@ class Thread:
 
         return pd.DataFrame(rows)
 
+    def to_comment_graph(self):
+        """
+        Build a conversation graph for this thread.
+
+        Returns ``(nodes, edges)`` — two lists of dicts ready to write as
+        CSV or pass to a graph library.
+
+        **Node fields:** ``node_id`` (``t3_`` for submission, ``t1_`` for
+        comments), ``type``, ``author``, ``score``, ``created_utc``, ``depth``
+        (0 = submission root, 1 = top-level reply, etc.)
+
+        **Edge fields:** ``source``, ``target``, ``time_delta`` (seconds
+        from the parent's post time to the child's post time).
+
+        Example::
+
+            nodes, edges = thread.to_comment_graph()
+        """
+        sub = self.submission
+        nodes = [{
+            'node_id': f't3_{sub.id}',
+            'type': 'submission',
+            'author': sub.author,
+            'score': sub.score,
+            'created_utc': sub.created_utc,
+            'depth': 0,
+        }]
+        edges = []
+
+        def _recurse(node: "CommentNode", parent_id: str, parent_utc: int, depth: int):
+            c = node.comment
+            nid = f't1_{c.id}'
+            nodes.append({
+                'node_id': nid,
+                'type': 'comment',
+                'author': c.author,
+                'score': c.score,
+                'created_utc': c.created_utc,
+                'depth': depth,
+            })
+            edges.append({
+                'source': parent_id,
+                'target': nid,
+                'time_delta': c.created_utc - parent_utc,
+            })
+            for reply in node.replies:
+                _recurse(reply, nid, c.created_utc, depth + 1)
+
+        root_id = f't3_{sub.id}'
+        for top_node in self.comments:
+            _recurse(top_node, root_id, sub.created_utc, 1)
+
+        return nodes, edges
+
+    def to_author_graph(self):
+        """
+        Build an author-interaction graph for this thread.
+
+        Returns ``(node_stats, edge_stats)`` — accumulator dicts suitable
+        for merging across many threads before writing to CSV.
+
+        ``node_stats`` is keyed by author username::
+
+            {author: {comment_count, total_score, first_seen_utc, last_seen_utc}}
+
+        ``edge_stats`` is keyed by ``(source_author, target_author)`` where
+        *source* replied to *target*::
+
+            {(src, tgt): {weight, first_interaction_utc}}
+
+        Deleted/unknown authors (``"[deleted]"`` or empty string) are
+        excluded from nodes and edges.
+
+        Example::
+
+            node_stats, edge_stats = thread.to_author_graph()
+        """
+        sub = self.submission
+        node_stats: dict = {}
+        edge_stats: dict = {}
+
+        def _update_author(author: str, score: int, ts: int) -> None:
+            if not author or author == '[deleted]':
+                return
+            if author not in node_stats:
+                node_stats[author] = {
+                    'comment_count': 0,
+                    'total_score': 0,
+                    'first_seen_utc': ts,
+                    'last_seen_utc': ts,
+                }
+            s = node_stats[author]
+            s['comment_count'] += 1
+            s['total_score'] += score
+            if ts < s['first_seen_utc']:
+                s['first_seen_utc'] = ts
+            if ts > s['last_seen_utc']:
+                s['last_seen_utc'] = ts
+
+        def _update_edge(src: str, tgt: str, ts: int) -> None:
+            if not src or not tgt or src == '[deleted]' or tgt == '[deleted]':
+                return
+            key = (src, tgt)
+            if key not in edge_stats:
+                edge_stats[key] = {'weight': 0, 'first_interaction_utc': ts}
+            e = edge_stats[key]
+            e['weight'] += 1
+            if ts < e['first_interaction_utc']:
+                e['first_interaction_utc'] = ts
+
+        # Seed OP as a node (they may or may not comment in their own thread)
+        op = sub.author
+        if op and op != '[deleted]':
+            node_stats[op] = {
+                'comment_count': 0,
+                'total_score': sub.score,
+                'first_seen_utc': sub.created_utc,
+                'last_seen_utc': sub.created_utc,
+            }
+
+        def _recurse(node: "CommentNode", parent_author: str) -> None:
+            c = node.comment
+            _update_author(c.author, c.score, c.created_utc)
+            _update_edge(c.author, parent_author, c.created_utc)
+            for reply in node.replies:
+                _recurse(reply, c.author)
+
+        for top_node in self.comments:
+            _recurse(top_node, op)
+
+        return node_stats, edge_stats
+
 
 @dataclass
 class CommentNode:

@@ -44,6 +44,11 @@ Signal Detection:
         detectors=[DeltaDetector("delta_awarded")],
     )
     sd.run_all_months()
+
+Graph Export:
+    data = load_subreddit("./extracted/ChangeMyView")
+    data.export_comment_graph("./graphs/")   # comment_graph_nodes.csv + edges.csv
+    data.export_author_graph("./graphs/")    # author_graph_nodes.csv + edges.csv
 """
 
 __version__ = "0.3.0"

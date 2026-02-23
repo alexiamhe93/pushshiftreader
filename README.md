@@ -13,6 +13,7 @@ A Python module for extracting and analyzing Reddit data from Pushshift archives
 - **Reconstruct comment trees** — Rebuild threaded conversations with nested replies
 - **Signal detection** — Annotate threads with custom boolean signals; ships with built-in detectors for regex, score thresholds, and OP participation
 - **DataFrame export** — One-line export to pandas with thread-level features (depth, thread size, response time, submission metadata) joined in; optional signals join
+- **Graph export** — Export conversation graphs (comment→reply) and author-interaction graphs (who replies to whom) as node/edge CSV files
 - **Multiple output formats** — CSV for easy analysis, compressed JSON for full fidelity
 - **Simple API** — Clean Python interface for research workflows
 
@@ -292,7 +293,80 @@ for thread in data.threads("2019-06"):
     high_scoring = df[df['score'] > 50]
 ```
 
-### 9. Load and Analyze
+### 9. Export Graphs
+
+Export conversation structure or author-interaction networks as node/edge CSV files,
+ready for Gephi, NetworkX, or any graph tool.
+
+**Comment/conversation graph** — nodes are submissions and comments, edges are replies:
+
+```python
+from pushshiftreader import load_subreddit
+
+data = load_subreddit("./extracted/ChangeMyView")
+
+# Writes comment_graph_nodes.csv and comment_graph_edges.csv
+data.export_comment_graph("./graphs/")
+
+# Single month
+data.export_comment_graph("./graphs/", month="2019-06")
+```
+
+**Author-interaction graph** — nodes are usernames, edges represent reply relationships:
+
+```python
+# Writes author_graph_nodes.csv and author_graph_edges.csv
+data.export_author_graph("./graphs/")
+```
+
+Both methods also work on individual `Thread` objects (returning lists of dicts rather than writing to disk):
+
+```python
+for thread in data.threads("2019-06"):
+    nodes, edges = thread.to_comment_graph()
+    nodes, edges = thread.to_author_graph()
+```
+
+**Output file schemas:**
+
+`comment_graph_nodes.csv`:
+
+| column | description |
+|---|---|
+| `node_id` | `t3_<id>` for submissions, `t1_<id>` for comments |
+| `type` | `submission` or `comment` |
+| `author` | Reddit username |
+| `score` | Net upvotes |
+| `created_utc` | Unix timestamp |
+| `depth` | 0 = submission root, 1 = top-level reply, etc. |
+
+`comment_graph_edges.csv`:
+
+| column | description |
+|---|---|
+| `source` | Parent node ID |
+| `target` | Child node ID |
+| `time_delta` | Seconds from parent post time to child post time |
+
+`author_graph_nodes.csv`:
+
+| column | description |
+|---|---|
+| `author` | Reddit username |
+| `comment_count` | Total comments in the dataset |
+| `total_score` | Sum of comment scores |
+| `first_seen_utc` / `last_seen_utc` | Activity window |
+
+`author_graph_edges.csv`:
+
+| column | description |
+|---|---|
+| `source` | Replying author |
+| `target` | Author being replied to |
+| `weight` | Number of times source replied to target |
+| `first_interaction_utc` | Timestamp of first interaction |
+
+### 10. Load and Analyze
 
 ```python
 from pushshiftreader import load_subreddit
@@ -441,6 +515,8 @@ data.get_submission(id)                      # Find specific submission
 data.get_thread(id)                          # Find specific thread
 data.comments_dataframe(month, signals)      # pandas DataFrame of comments
 data.submissions_dataframe(month, signals)   # pandas DataFrame of submissions
+data.export_comment_graph(output_dir, month) # write conversation graph CSVs
+data.export_author_graph(output_dir, month)  # write author-interaction graph CSVs
 ```
 
 ### Data Models
@@ -487,6 +563,8 @@ thread.all_comments              # Flat list of all comments
 thread.comment_count             # Total comment count
 thread.walk()                    # Iterator of (comment, depth) tuples
 thread.to_dataframe()            # pandas DataFrame with thread features joined
+thread.to_comment_graph()        # (nodes, edges) lists for conversation graph
+thread.to_author_graph()         # (node_stats, edge_stats) for author graph
 ```
 
 ## Command Line

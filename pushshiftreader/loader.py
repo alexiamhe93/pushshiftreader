@@ -394,6 +394,180 @@ class SubredditData:
 
         return pd.concat(dfs, ignore_index=True)
 
+    def export_comment_graph(
+        self,
+        output_dir: Path,
+        month: Optional[str] = None,
+    ) -> Dict[str, int]:
+        """
+        Export a comment/conversation graph to CSV files.
+
+        Writes two files to ``output_dir``:
+
+        - ``comment_graph_nodes.csv`` — one row per submission or comment
+        - ``comment_graph_edges.csv`` — one directed edge per reply
+
+        **Node columns:** ``node_id``, ``type``, ``author``, ``score``,
+        ``created_utc``, ``depth``
+
+        **Edge columns:** ``source``, ``target``, ``time_delta``
+        (seconds from the parent post's timestamp to the child's)
+
+        Node and edge rows are streamed directly to disk as each thread is
+        processed, so memory usage stays flat regardless of data volume.
+        Requires ``TreeBuilder`` to have been run first.
+
+        Args:
+            output_dir: Directory to write the two CSV files into.
+            month: Specific month (``YYYY-MM``) or ``None`` for all months.
+
+        Returns:
+            Dict with ``nodes`` and ``edges`` counts.
+        """
+        from .utils import ensure_directory
+        output_dir = ensure_directory(Path(output_dir))
+
+        months = [month] if month else self.months
+
+        node_fields = ['node_id', 'type', 'author', 'score', 'created_utc', 'depth']
+        edge_fields = ['source', 'target', 'time_delta']
+
+        nodes_path = output_dir / 'comment_graph_nodes.csv'
+        edges_path = output_dir / 'comment_graph_edges.csv'
+
+        total_nodes = 0
+        total_edges = 0
+
+        with (
+            open(nodes_path, 'w', newline='', encoding='utf-8') as nf,
+            open(edges_path, 'w', newline='', encoding='utf-8') as ef,
+        ):
+            node_writer = csv.DictWriter(nf, fieldnames=node_fields)
+            edge_writer = csv.DictWriter(ef, fieldnames=edge_fields)
+            node_writer.writeheader()
+            edge_writer.writeheader()
+
+            for m in months:
+                threads_path = self._month_path(m) / 'threads.jsonl.gz'
+                if not threads_path.exists():
+                    logger.warning(
+                        f"No threads.jsonl.gz for {m} — "
+                        "run TreeBuilder first, skipping"
+                    )
+                    continue
+
+                for thread in load_threads(threads_path):
+                    nodes, edges = thread.to_comment_graph()
+                    node_writer.writerows(nodes)
+                    edge_writer.writerows(edges)
+                    total_nodes += len(nodes)
+                    total_edges += len(edges)
+
+        logger.info(
+            f"Comment graph: {total_nodes:,} nodes, {total_edges:,} edges → {output_dir}"
+        )
+        return {'nodes': total_nodes, 'edges': total_edges}
+
+    def export_author_graph(
+        self,
+        output_dir: Path,
+        month: Optional[str] = None,
+    ) -> Dict[str, int]:
+        """
+        Export an author-interaction graph to CSV files.
+
+        Writes two files to ``output_dir``:
+
+        - ``author_graph_nodes.csv`` — one row per unique author
+        - ``author_graph_edges.csv`` — one directed edge per unique
+          (replier, replied-to) pair, with interaction count as weight
+
+        **Node columns:** ``author``, ``comment_count``, ``total_score``,
+        ``first_seen_utc``, ``last_seen_utc``
+
+        **Edge columns:** ``source``, ``target``, ``weight``,
+        ``first_interaction_utc``
+
+        Deleted/unknown authors are excluded.  Author stats and interaction
+        counts are accumulated across all threads before writing.
+        Requires ``TreeBuilder`` to have been run first.
+
+        Args:
+            output_dir: Directory to write the two CSV files into.
+            month: Specific month (``YYYY-MM``) or ``None`` for all months.
+
+        Returns:
+            Dict with ``nodes`` and ``edges`` counts.
+        """
+        from .utils import ensure_directory
+        output_dir = ensure_directory(Path(output_dir))
+
+        months = [month] if month else self.months
+
+        # Accumulate across all threads
+        all_node_stats: Dict[str, Dict] = {}
+        all_edge_stats: Dict[tuple, Dict] = {}
+
+        for m in months:
+            threads_path = self._month_path(m) / 'threads.jsonl.gz'
+            if not threads_path.exists():
+                logger.warning(
+                    f"No threads.jsonl.gz for {m} — "
+                    "run TreeBuilder first, skipping"
+                )
+                continue
+
+            for thread in load_threads(threads_path):
+                node_stats, edge_stats = thread.to_author_graph()
+
+                for author, stats in node_stats.items():
+                    if author not in all_node_stats:
+                        all_node_stats[author] = dict(stats)
+                    else:
+                        s = all_node_stats[author]
+                        s['comment_count'] += stats['comment_count']
+                        s['total_score'] += stats['total_score']
+                        if stats['first_seen_utc'] < s['first_seen_utc']:
+                            s['first_seen_utc'] = stats['first_seen_utc']
+                        if stats['last_seen_utc'] > s['last_seen_utc']:
+                            s['last_seen_utc'] = stats['last_seen_utc']
+
+                for (src, tgt), stats in edge_stats.items():
+                    key = (src, tgt)
+                    if key not in all_edge_stats:
+                        all_edge_stats[key] = dict(stats)
+                    else:
+                        e = all_edge_stats[key]
+                        e['weight'] += stats['weight']
+                        if stats['first_interaction_utc'] < e['first_interaction_utc']:
+                            e['first_interaction_utc'] = stats['first_interaction_utc']
+
+        # Write to CSV
+        node_fields = ['author', 'comment_count', 'total_score',
+                       'first_seen_utc', 'last_seen_utc']
+        edge_fields = ['source', 'target', 'weight', 'first_interaction_utc']
+
+        nodes_path = output_dir / 'author_graph_nodes.csv'
+        edges_path = output_dir / 'author_graph_edges.csv'
+
+        with open(nodes_path, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=node_fields)
+            writer.writeheader()
+            for author, stats in all_node_stats.items():
+                writer.writerow({'author': author, **stats})
+
+        with open(edges_path, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=edge_fields)
+            writer.writeheader()
+            for (src, tgt), stats in all_edge_stats.items():
+                writer.writerow({'source': src, 'target': tgt, **stats})
+
+        logger.info(
+            f"Author graph: {len(all_node_stats):,} nodes, "
+            f"{len(all_edge_stats):,} edges → {output_dir}"
+        )
+        return {'nodes': len(all_node_stats), 'edges': len(all_edge_stats)}
+
     def month_stats(self, month: str) -> Dict[str, Any]:
         """Get statistics for a specific month."""
         month_path = self._month_path(month)
