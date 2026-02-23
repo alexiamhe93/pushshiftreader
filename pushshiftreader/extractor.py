@@ -11,7 +11,7 @@ import logging
 import re
 import time
 from pathlib import Path
-from typing import List, Set, Optional, Dict
+from typing import Any, List, Set, Optional, Dict
 from dataclasses import dataclass, field
 
 from .reader import ZstReader, read_zst_records, ReadProgress
@@ -65,6 +65,140 @@ class ExtractionResult:
     stats: List[ExtractionStats] = field(default_factory=list)
 
 
+@dataclass
+class _MonthJob:
+    """Bundle of parameters for processing one month in a worker process."""
+    month: str
+    comments_path: Optional[Path]
+    submissions_path: Optional[Path]
+    skip_subreddits: frozenset
+    output_path: Path
+    subreddit_set: frozenset
+    output_format: str
+    include_patterns: List[str]   # raw strings — recompiled in each worker
+    exclude_patterns: List[str]
+
+
+def _run_month_job(job: _MonthJob):
+    """
+    Module-level worker: process one month's submissions and comments files.
+
+    Runs in a subprocess when workers > 1.  Returns (month, stats_by_sub,
+    author_acc_by_sub) for the main process to write out.
+    """
+    import re as _re
+    import time as _time
+
+    include_compiled = [_re.compile(p, _re.IGNORECASE) for p in job.include_patterns]
+    exclude_compiled = [_re.compile(p, _re.IGNORECASE) for p in job.exclude_patterns]
+
+    stats_by_sub: Dict[str, ExtractionStats] = {}
+    author_acc_by_sub: Dict[str, Dict] = {}
+
+    def _check_subreddit(record: dict) -> bool:
+        return record.get('subreddit', '').lower() in job.subreddit_set
+
+    def _check_keywords(record: dict, record_type: str) -> bool:
+        if not include_compiled and not exclude_compiled:
+            return True
+        text = (
+            (record.get('title') or '') + ' ' + (record.get('selftext') or '')
+            if record_type == 'submissions'
+            else (record.get('body') or '')
+        )
+        if include_compiled and not any(p.search(text) for p in include_compiled):
+            return False
+        if exclude_compiled and any(p.search(text) for p in exclude_compiled):
+            return False
+        return True
+
+    def _process_file(file_path: Path, record_type: str) -> None:
+        writers_by_sub: Dict[str, Dict[str, Any]] = {}
+        try:
+            for record in read_zst_records(file_path, filter_fn=_check_subreddit):
+                subreddit = record.get('subreddit', '').lower()
+
+                if subreddit in job.skip_subreddits:
+                    continue
+                if not _check_keywords(record, record_type):
+                    continue
+
+                # Lazily open writers on the first record for each subreddit
+                if subreddit not in writers_by_sub:
+                    safe_name = sanitize_subreddit_name(subreddit)
+                    out_dir = ensure_directory(job.output_path / safe_name / job.month)
+                    w: Dict[str, Any] = {}
+                    if record_type == 'submissions':
+                        if job.output_format in ('csv', 'both'):
+                            w['csv'] = CsvWriter(out_dir / 'submissions.csv', fields=SUBMISSION_CSV_FIELDS)
+                        if job.output_format in ('jsonl', 'both'):
+                            w['jsonl'] = JsonlWriter(out_dir / 'submissions.jsonl.gz')
+                    else:
+                        if job.output_format in ('csv', 'both'):
+                            w['csv'] = CsvWriter(out_dir / 'comments.csv', fields=COMMENT_CSV_FIELDS)
+                        if job.output_format in ('jsonl', 'both'):
+                            w['jsonl'] = JsonlWriter(out_dir / 'comments.jsonl.gz')
+                    writers_by_sub[subreddit] = w
+                    for writer in w.values():
+                        writer.__enter__()
+
+                    if subreddit not in stats_by_sub:
+                        stats_by_sub[subreddit] = ExtractionStats(
+                            subreddit=subreddit, month=job.month
+                        )
+
+                for writer in writers_by_sub[subreddit].values():
+                    writer.write(record)
+
+                if record_type == 'submissions':
+                    stats_by_sub[subreddit].submissions_count += 1
+                else:
+                    stats_by_sub[subreddit].comments_count += 1
+
+                author = record.get('author') or '[deleted]'
+                score = int(record.get('score') or 0)
+                ts = int(record.get('created_utc') or 0)
+
+                a_stats = author_acc_by_sub.setdefault(subreddit, {})
+                entry = a_stats.get(author)
+                if entry is None:
+                    entry = {
+                        'comment_count': 0, 'submission_count': 0,
+                        'comment_score_total': 0, 'submission_score_total': 0,
+                        'first_seen_utc': ts, 'last_seen_utc': ts,
+                    }
+                    a_stats[author] = entry
+
+                if record_type == 'submissions':
+                    entry['submission_count'] += 1
+                    entry['submission_score_total'] += score
+                else:
+                    entry['comment_count'] += 1
+                    entry['comment_score_total'] += score
+
+                if ts < entry['first_seen_utc']:
+                    entry['first_seen_utc'] = ts
+                if ts > entry['last_seen_utc']:
+                    entry['last_seen_utc'] = ts
+
+        finally:
+            for w in writers_by_sub.values():
+                for writer in w.values():
+                    writer.__exit__(None, None, None)
+
+    start = _time.time()
+    if job.submissions_path:
+        _process_file(job.submissions_path, 'submissions')
+    if job.comments_path:
+        _process_file(job.comments_path, 'comments')
+
+    duration = _time.time() - start
+    for s in stats_by_sub.values():
+        s.duration_seconds = duration
+
+    return job.month, stats_by_sub, author_acc_by_sub
+
+
 class SubredditExtractor:
     """
     Extract data for specific subreddits from Pushshift archives.
@@ -96,6 +230,7 @@ class SubredditExtractor:
         include_patterns: Optional[List[str]] = None,
         exclude_patterns: Optional[List[str]] = None,
         force: bool = False,
+        workers: int = 1,
     ):
         """
         Initialize the extractor.
@@ -117,6 +252,10 @@ class SubredditExtractor:
                 If None or empty, no records are dropped.
             force: If True, re-extract even if metadata.json already exists for a
                 subreddit/month. Default: False (skip already-completed months).
+            workers: Number of parallel worker processes for extraction.
+                Set to -1 to use all available CPU cores.
+                Default is 1 (sequential). When workers > 1, per-file progress
+                bars are replaced by a per-month completion bar.
         """
         self.archive_path = Path(archive_path)
         self.output_path = Path(output_path)
@@ -127,6 +266,11 @@ class SubredditExtractor:
         self.submissions_subdir = submissions_subdir
         self.show_progress = show_progress
         self.force = force
+
+        if workers == -1:
+            import os
+            workers = os.cpu_count() or 1
+        self.workers = max(1, workers)
 
         # Compile keyword patterns (case-insensitive)
         self._include_compiled = [
@@ -486,6 +630,9 @@ class SubredditExtractor:
         Returns:
             ExtractionResult with statistics
         """
+        if self.workers != 1:
+            return self._run_parallel(start_month, end_month)
+
         start_time = time.time()
 
         logger.info(f"Extracting subreddits: {', '.join(self.subreddits)}")
@@ -587,6 +734,140 @@ class SubredditExtractor:
             total_comments=total_comments,
             duration_seconds=total_duration,
             stats=all_stats
+        )
+
+        logger.info(f"\n=== Extraction Complete ===")
+        logger.info(f"Processed {result.months_processed} months")
+        logger.info(f"Total: {total_submissions:,} submissions, {total_comments:,} comments")
+        logger.info(f"Duration: {format_duration(total_duration)}")
+
+        return result
+
+    def _run_parallel(
+        self,
+        start_month: Optional[str] = None,
+        end_month: Optional[str] = None,
+    ) -> ExtractionResult:
+        """Run extraction across multiple processes, one month per worker."""
+        from concurrent.futures import ProcessPoolExecutor, as_completed
+
+        start_time = time.time()
+
+        logger.info(f"Extracting subreddits: {', '.join(self.subreddits)}")
+        logger.info(f"Output path: {self.output_path}")
+        logger.info(f"Workers: {self.workers}")
+
+        if self._include_compiled:
+            logger.info(f"Include patterns: {[p.pattern for p in self._include_compiled]}")
+        if self._exclude_compiled:
+            logger.info(f"Exclude patterns: {[p.pattern for p in self._exclude_compiled]}")
+
+        # Filter archives by date range
+        archives_to_process = self.archives
+        if start_month:
+            archives_to_process = [a for a in archives_to_process if a.month_str >= start_month]
+        if end_month:
+            archives_to_process = [a for a in archives_to_process if a.month_str <= end_month]
+
+        if not archives_to_process:
+            logger.warning("No archives match the specified date range")
+            return ExtractionResult(
+                subreddits=self.subreddits,
+                months_processed=0, total_submissions=0,
+                total_comments=0, duration_seconds=0.0,
+            )
+
+        # Build one job per month, skipping already-completed months
+        jobs: List[_MonthJob] = []
+        for month, comments_file, submissions_file in iter_archive_pairs(archives_to_process):
+            if not self.force:
+                done = frozenset(
+                    sub for sub in self.subreddits if self._is_month_done(sub, month)
+                )
+                if done >= self.subreddit_set:
+                    logger.info(f"All subreddits already extracted for {month}, skipping")
+                    continue
+                for sub in done:
+                    logger.info(f"  Skipping {sub}/{month}: already extracted")
+                skip_for_month = done
+            else:
+                skip_for_month = frozenset()
+
+            jobs.append(_MonthJob(
+                month=month,
+                comments_path=comments_file.path if comments_file else None,
+                submissions_path=submissions_file.path if submissions_file else None,
+                skip_subreddits=skip_for_month,
+                output_path=self.output_path,
+                subreddit_set=frozenset(self.subreddits),
+                output_format=self.output_format,
+                include_patterns=[p.pattern for p in self._include_compiled],
+                exclude_patterns=[p.pattern for p in self._exclude_compiled],
+            ))
+
+        if not jobs:
+            logger.info("All months already extracted, nothing to do")
+            return ExtractionResult(
+                subreddits=self.subreddits,
+                months_processed=0, total_submissions=0,
+                total_comments=0, duration_seconds=0.0,
+            )
+
+        logger.info(f"Processing {len(jobs)} months across {self.workers} workers")
+
+        all_stats: List[ExtractionStats] = []
+        months_seen: Set[str] = set()
+        total_submissions = 0
+        total_comments = 0
+
+        pbar = None
+        if self.show_progress:
+            try:
+                from tqdm import tqdm
+                pbar = tqdm(total=len(jobs), unit='month', desc='Extracting')
+            except ImportError:
+                pass
+
+        try:
+            with ProcessPoolExecutor(max_workers=self.workers) as pool:
+                futures = {pool.submit(_run_month_job, job): job for job in jobs}
+                for future in as_completed(futures):
+                    job = futures[future]
+                    try:
+                        month, stats_by_sub, author_acc_by_sub = future.result()
+                    except Exception as e:
+                        logger.error(f"Error processing {job.month}: {e}")
+                        raise
+
+                    months_seen.add(month)
+                    for subreddit, stats in stats_by_sub.items():
+                        total_submissions += stats.submissions_count
+                        total_comments += stats.comments_count
+                        all_stats.append(stats)
+                        logger.info(f"  {stats}")
+                        self._write_month_metadata(subreddit, month, stats)
+                        if subreddit in author_acc_by_sub:
+                            self._write_month_authors(subreddit, month, author_acc_by_sub[subreddit])
+
+                    if pbar:
+                        pbar.update(1)
+        finally:
+            if pbar:
+                pbar.close()
+
+        total_duration = time.time() - start_time
+
+        for subreddit in self.subreddits:
+            self._write_subreddit_metadata(subreddit)
+            self._write_subreddit_authors(subreddit)
+
+        result = ExtractionResult(
+            subreddits=self.subreddits,
+            months_processed=len(months_seen),
+            total_submissions=total_submissions,
+            total_comments=total_comments,
+            duration_seconds=total_duration,
+            stats=all_stats,
         )
 
         logger.info(f"\n=== Extraction Complete ===")

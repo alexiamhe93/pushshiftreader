@@ -29,6 +29,7 @@ def cmd_extract(args):
         include_patterns=args.include or [],
         exclude_patterns=args.exclude or [],
         force=args.force,
+        workers=args.workers,
     )
 
     result = extractor.run(
@@ -194,6 +195,16 @@ def main():
         '--force',
         action='store_true',
         help='Re-extract months even if they were already extracted (overrides resume behaviour)'
+    )
+    extract_parser.add_argument(
+        '--workers', '-w',
+        type=int,
+        default=1,
+        metavar='N',
+        help=(
+            'Number of parallel worker processes (default: 1 = sequential). '
+            'Use -1 to use all available CPU cores.'
+        )
     )
     
     # Build trees command

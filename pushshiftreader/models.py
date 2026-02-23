@@ -139,8 +139,10 @@ class Submission:
                 extra[key] = value
         
         kwargs['_extra'] = extra
+        if 'created_utc' in kwargs:
+            kwargs['created_utc'] = int(kwargs['created_utc'])
         return cls(**kwargs)
-    
+
     def to_dict(self, include_extra: bool = True) -> dict:
         """Convert to dictionary, optionally including extra fields."""
         d = asdict(self)
@@ -262,8 +264,10 @@ class Comment:
                 extra[key] = value
         
         kwargs['_extra'] = extra
+        if 'created_utc' in kwargs:
+            kwargs['created_utc'] = int(kwargs['created_utc'])
         return cls(**kwargs)
-    
+
     def to_dict(self, include_extra: bool = True) -> dict:
         """Convert to dictionary, optionally including extra fields."""
         d = asdict(self)
