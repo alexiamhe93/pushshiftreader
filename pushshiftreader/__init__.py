@@ -31,9 +31,22 @@ Command Line:
     python -m pushshiftreader extract --archive /path/to/dumps --output ./out --subreddits AskHistorians
     python -m pushshiftreader build-trees ./out/AskHistorians
     python -m pushshiftreader info ./out/AskHistorians
+
+Signal Detection:
+    from pushshiftreader import SignalDetector, Detector, RegexDetector
+
+    class DeltaDetector(Detector):
+        def detect_comment(self, comment, thread):
+            return 'Δ' in comment.body or '!delta' in comment.body.lower()
+
+    sd = SignalDetector(
+        "./extracted/ChangeMyView",
+        detectors=[DeltaDetector("delta_awarded")],
+    )
+    sd.run_all_months()
 """
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 __author__ = "Your Name"
 
 # Core data models
@@ -80,6 +93,15 @@ from .writers import (
     COMMENT_CSV_FIELDS
 )
 
+# Signal detection
+from .signals import (
+    Detector,
+    SignalDetector,
+    RegexDetector,
+    ScoreDetector,
+    AuthorIsOPDetector,
+)
+
 # Utilities
 from .utils import (
     setup_logging,
@@ -101,6 +123,13 @@ __all__ = [
     'SubredditExtractor',
     'TreeBuilder',
     'SubredditData',
+    'SignalDetector',
+
+    # Signal detectors
+    'Detector',
+    'RegexDetector',
+    'ScoreDetector',
+    'AuthorIsOPDetector',
     
     # Result types
     'ExtractionResult',

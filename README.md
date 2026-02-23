@@ -11,6 +11,7 @@ A Python module for extracting and analyzing Reddit data from Pushshift archives
 - **Keyword/regex filtering** — Filter posts and comments by content at extraction time
 - **Author statistics** — Per-author activity counts, scores, and date ranges written to CSV
 - **Reconstruct comment trees** — Rebuild threaded conversations with nested replies
+- **Signal detection** — Annotate threads with custom boolean signals; ships with built-in detectors for regex, score thresholds, and OP participation
 - **Multiple output formats** — CSV for easy analysis, compressed JSON for full fidelity
 - **Simple API** — Clean Python interface for research workflows
 
@@ -182,7 +183,62 @@ Command line:
 pushshiftreader build-trees ./extracted/AskHistorians
 ```
 
-### 7. Load and Analyze
+### 7. Detect Signals
+
+After building trees, run custom detectors over thread data to produce a
+`signals.csv` per month.  Each detector adds one boolean column; only rows
+where at least one signal fires are written (sparse output, easy to join with
+`comments.csv`).
+
+**Subclass `Detector` to define your own signal:**
+
+```python
+from pushshiftreader import SignalDetector, Detector, RegexDetector, AuthorIsOPDetector
+
+class DeltaDetector(Detector):
+    """Fires when a comment contains a delta award (CMV convention)."""
+    def detect_comment(self, comment, thread):
+        return 'Δ' in comment.body or '!delta' in comment.body.lower()
+
+class VerdictDetector(Detector):
+    """Fires when a top-level comment contains an AITA verdict token."""
+    import re
+    _VERDICTS = re.compile(r'\b(NTA|YTA|ESH|NAH|INFO)\b')
+
+    def detect_comment(self, comment, thread):
+        return bool(self._VERDICTS.search(comment.body)) and comment.is_top_level
+
+sd = SignalDetector(
+    "./extracted/ChangeMyView",
+    detectors=[
+        DeltaDetector("delta_awarded"),
+        AuthorIsOPDetector("op_comment"),
+        RegexDetector("cites_source", r"https?://"),
+    ],
+)
+results = sd.run_all_months()
+# writes extracted/ChangeMyView/YYYY-MM/signals.csv for each month
+```
+
+**Built-in detectors:**
+
+| Class | Description |
+|---|---|
+| `RegexDetector(name, pattern, record_type, fields)` | Fires if any text field matches the regex |
+| `ScoreDetector(name, min_score, max_score, record_type)` | Fires if score is within the given bounds |
+| `AuthorIsOPDetector(name)` | Fires if the commenter is the submission's OP |
+
+**`signals.csv` format** (one row per record where at least one signal fired):
+
+| column | description |
+|---|---|
+| `record_id` | Comment or submission ID |
+| `record_type` | `"comment"` or `"submission"` |
+| `<signal_name>` | One boolean column per detector |
+
+Join with `comments.csv` on `record_id`; a missing row means all signals are `False`.
+
+### 8. Load and Analyze
 
 ```python
 from pushshiftreader import load_subreddit
@@ -290,6 +346,30 @@ builder = TreeBuilder(
 
 builder.build_month("2023-01")  # Build specific month
 builder.build_all_months()       # Build all months
+```
+
+#### `SignalDetector`
+
+Runs detectors over thread data and writes `signals.csv`.
+
+```python
+sd = SignalDetector(
+    extracted_path: Path,          # Path to extracted subreddit directory
+    detectors: List[Detector],     # One or more Detector instances (names must be unique)
+)
+
+sd.run_month("2023-01")            # Detect signals for one month
+sd.run_all_months()                # Detect signals for all months with threads
+```
+
+#### `Detector`
+
+Abstract base class for custom signals.  Override either or both methods:
+
+```python
+class MyDetector(Detector):
+    def detect_comment(self, comment: Comment, thread: Thread) -> bool: ...
+    def detect_submission(self, submission: Submission, thread: Thread) -> bool: ...
 ```
 
 #### `SubredditData`
@@ -414,6 +494,7 @@ pushshiftreader/
 ├── writers.py           # CSV and compressed JSON output
 ├── extractor.py         # Main subreddit extraction engine
 ├── trees.py             # Comment tree reconstruction with SQLite
+├── signals.py           # Signal detection framework and built-in detectors
 ├── loader.py            # Clean API for loading extracted data
 ├── cli.py               # Command-line interface
 pyproject.toml           # Package configuration
