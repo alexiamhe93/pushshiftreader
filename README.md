@@ -6,6 +6,7 @@ A Python module for extracting and analyzing Reddit data from Pushshift archives
 
 - **Stream large archives** — Memory-efficient processing of multi-gigabyte .zst files
 - **Extract by subreddit** — Pull specific subreddits from the full archive
+- **Parallel extraction** — Process multiple months simultaneously with `workers=N` or `--workers -1`
 - **Resumable extraction** — Re-run safely; completed months are skipped automatically
 - **Keyword/regex filtering** — Filter posts and comments by content at extraction time
 - **Author statistics** — Per-author activity counts, scores, and date ranges written to CSV
@@ -79,7 +80,37 @@ pushshiftreader extract \
 pushshiftreader extract ... --force
 ```
 
-### 3. Filter by Keyword or Regex
+### 3. Speed Up Extraction with Parallel Workers
+
+For large archives, process multiple months at the same time by setting `workers`:
+
+```python
+extractor = SubredditExtractor(
+    archive_path="/path/to/reddit_dumps",
+    output_path="./extracted",
+    subreddits=["ChangeMyView"],
+    workers=-1,   # use all available CPU cores
+)
+result = extractor.run()
+```
+
+```bash
+# Use all CPU cores
+pushshiftreader extract \
+    --archive /path/to/reddit_dumps \
+    --output ./extracted \
+    --subreddits ChangeMyView \
+    --workers -1
+
+# Or specify an exact count
+pushshiftreader extract ... --workers 8
+```
+
+Each month is processed in an independent worker process. The sequential code path (the default, `workers=1`) is unchanged — per-file progress bars still work as before. With `workers > 1`, a per-month completion bar is shown instead.
+
+Resumability works normally in parallel mode: already-completed months are detected before any workers are launched and simply skipped.
+
+### 4. Filter by Keyword or Regex
 
 Keep only records whose text matches your patterns. Filters are applied during streaming,
 so non-matching records never touch disk.
@@ -111,7 +142,7 @@ pushshiftreader extract \
 
 The patterns used are recorded in every `metadata.json` file for reproducibility.
 
-### 4. Author Statistics
+### 5. Author Statistics
 
 After each extraction, `authors.csv` files are written automatically — no extra steps needed.
 
@@ -134,7 +165,7 @@ including those from previous runs:
 
 Same columns as above, plus `months_active` (number of distinct months with activity).
 
-### 5. Build Comment Trees
+### 6. Build Comment Trees
 
 Reconstruct threaded conversations:
 
@@ -151,7 +182,7 @@ Command line:
 pushshiftreader build-trees ./extracted/AskHistorians
 ```
 
-### 6. Load and Analyze
+### 7. Load and Analyze
 
 ```python
 from pushshiftreader import load_subreddit
@@ -238,6 +269,7 @@ extractor = SubredditExtractor(
     include_patterns: List[str] = None,    # Keep records matching any pattern
     exclude_patterns: List[str] = None,    # Drop records matching any pattern
     force: bool = False,                   # Re-extract already-completed months
+    workers: int = 1,                      # Parallel worker processes (-1 = all cores)
 )
 
 result = extractor.run(
@@ -346,6 +378,13 @@ pushshiftreader extract \
 # Force re-extraction of already-completed months
 pushshiftreader extract ... --force
 
+# Parallel extraction — use all CPU cores
+pushshiftreader extract \
+    --archive /path/to/dumps \
+    --output ./extracted \
+    --subreddits AskHistorians \
+    --workers -1
+
 # Build comment trees
 pushshiftreader build-trees ./extracted/AskHistorians
 
@@ -355,12 +394,13 @@ pushshiftreader info ./extracted/AskHistorians -v
 
 ## Tips for Large Archives
 
-1. **Extract to SSD** — Tree building does heavy random access
-2. **Process in batches** — Use `--start-month` and `--end-month` to chunk work
-3. **Resume freely** — Completed months are always skipped; no need to track progress manually
-4. **Monitor disk space** — Extracted data is ~7x larger than compressed
-5. **Use JSONL format** — If you only need Python access, skip CSV with `--format jsonl`
-6. **Filter early** — Use `--include`/`--exclude` to reduce output size when studying a specific topic
+1. **Use parallel workers** — `--workers -1` saturates all CPU cores; the bottleneck for large archives is .zst decompression, which scales well across months
+2. **Extract to SSD** — Tree building does heavy random access
+3. **Process in batches** — Use `--start-month` and `--end-month` to chunk work
+4. **Resume freely** — Completed months are always skipped; no need to track progress manually
+5. **Monitor disk space** — Extracted data is ~7x larger than compressed
+6. **Use JSONL format** — If you only need Python access, skip CSV with `--format jsonl`
+7. **Filter early** — Use `--include`/`--exclude` to reduce output size when studying a specific topic
 
 ## File Structure
 
