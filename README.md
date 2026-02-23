@@ -12,6 +12,7 @@ A Python module for extracting and analyzing Reddit data from Pushshift archives
 - **Author statistics** — Per-author activity counts, scores, and date ranges written to CSV
 - **Reconstruct comment trees** — Rebuild threaded conversations with nested replies
 - **Signal detection** — Annotate threads with custom boolean signals; ships with built-in detectors for regex, score thresholds, and OP participation
+- **DataFrame export** — One-line export to pandas with thread-level features (depth, thread size, response time, submission metadata) joined in; optional signals join
 - **Multiple output formats** — CSV for easy analysis, compressed JSON for full fidelity
 - **Simple API** — Clean Python interface for research workflows
 
@@ -27,6 +28,12 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 
 # Install with progress bars
 pip install -e ".[progress]"
+
+# Install with DataFrame export support
+pip install -e ".[analysis]"
+
+# Install everything
+pip install -e ".[all]"
 
 # Or minimal install
 pip install -e .
@@ -238,7 +245,54 @@ results = sd.run_all_months()
 
 Join with `comments.csv` on `record_id`; a missing row means all signals are `False`.
 
-### 8. Load and Analyze
+### 8. Export to pandas DataFrame
+
+After building trees, export comments or submissions to a pandas DataFrame
+with thread-level features automatically joined in.
+
+```python
+from pushshiftreader import load_subreddit
+
+data = load_subreddit("./extracted/ChangeMyView")
+
+# All comments across all months — with depth, thread size, response time,
+# and submission metadata joined in per row.
+# If signals.csv exists for a month it is joined in automatically.
+df = data.comments_dataframe()
+
+# Single month
+df = data.comments_dataframe("2019-06")
+
+# Submissions DataFrame
+subs = data.submissions_dataframe()
+
+# Skip signals join
+df = data.comments_dataframe(signals=False)
+```
+
+**Columns added on top of standard comment fields:**
+
+| column | description |
+|---|---|
+| `month` | Source month (``YYYY-MM``) |
+| `depth` | Depth in reply tree (0 = top-level comment) |
+| `thread_size` | Total comments in the thread |
+| `time_since_submission` | Seconds between submission post time and comment post time |
+| `submission_id` | Parent submission ID |
+| `submission_title` | Parent submission title |
+| `submission_score` | Parent submission score |
+| `submission_author` | Parent submission author |
+| `<signal_name>` | Boolean signal columns, if ``signals.csv`` exists |
+
+You can also convert a single `Thread` object directly:
+
+```python
+for thread in data.threads("2019-06"):
+    df = thread.to_dataframe()   # same columns as above, no 'month'
+    high_scoring = df[df['score'] > 50]
+```
+
+### 9. Load and Analyze
 
 ```python
 from pushshiftreader import load_subreddit
@@ -379,12 +433,14 @@ Interface for accessing extracted data.
 ```python
 data = load_subreddit("./extracted/AskHistorians")
 
-data.months                      # List of available months
-data.submissions(month=None)     # Iterator over submissions
-data.comments(month=None)        # Iterator over comments
-data.threads(month=None)         # Iterator over threads
-data.get_submission(id)          # Find specific submission
-data.get_thread(id)              # Find specific thread
+data.months                                  # List of available months
+data.submissions(month=None)                 # Iterator over submissions
+data.comments(month=None)                    # Iterator over comments
+data.threads(month=None)                     # Iterator over threads
+data.get_submission(id)                      # Find specific submission
+data.get_thread(id)                          # Find specific thread
+data.comments_dataframe(month, signals)      # pandas DataFrame of comments
+data.submissions_dataframe(month, signals)   # pandas DataFrame of submissions
 ```
 
 ### Data Models
@@ -430,6 +486,7 @@ thread.comments                  # List of top-level CommentNodes
 thread.all_comments              # Flat list of all comments
 thread.comment_count             # Total comment count
 thread.walk()                    # Iterator of (comment, depth) tuples
+thread.to_dataframe()            # pandas DataFrame with thread features joined
 ```
 
 ## Command Line

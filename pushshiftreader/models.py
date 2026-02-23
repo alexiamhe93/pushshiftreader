@@ -316,6 +316,52 @@ class Thread:
         """Convert to JSON string."""
         return json.dumps(self.to_dict(), **kwargs)
 
+    def to_dataframe(self):
+        """
+        Return a pandas DataFrame of all comments in this thread.
+
+        Each row is one comment.  Thread-level features are joined in as
+        extra columns:
+
+        - ``depth`` — depth in the reply tree (0 = top-level)
+        - ``thread_size`` — total number of comments in the thread
+        - ``time_since_submission`` — seconds between the submission's
+          post time and the comment's post time
+        - ``submission_id``, ``submission_title``, ``submission_score``,
+          ``submission_author`` — metadata from the parent submission
+
+        Returns an empty DataFrame if the thread has no comments.
+
+        Requires ``pandas`` (``pip install pandas``).
+        """
+        try:
+            import pandas as pd
+        except ImportError:
+            raise ImportError(
+                "pandas is required for DataFrame export. "
+                "Install it with: pip install pandas"
+            )
+
+        sub = self.submission
+        thread_size = self.comment_count
+
+        rows = []
+        for comment, depth in self.walk():
+            row = comment.to_dict(include_extra=False)
+            row['depth'] = depth
+            row['thread_size'] = thread_size
+            row['time_since_submission'] = comment.created_utc - sub.created_utc
+            row['submission_id'] = sub.id
+            row['submission_title'] = sub.title
+            row['submission_score'] = sub.score
+            row['submission_author'] = sub.author
+            rows.append(row)
+
+        if not rows:
+            return pd.DataFrame()
+
+        return pd.DataFrame(rows)
+
 
 @dataclass
 class CommentNode:

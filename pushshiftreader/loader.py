@@ -8,9 +8,12 @@ from extracted and processed subreddit data.
 import csv
 import gzip
 import json
+import logging
 from pathlib import Path
 from typing import Iterator, List, Optional, Dict, Any
 from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
 
 from .models import Submission, Comment, Thread, CommentNode
 from .trees import load_threads
@@ -261,6 +264,136 @@ class SubredditData:
         """Count comments (optionally for a specific month)."""
         return sum(1 for _ in self.comments(month))
     
+    def comments_dataframe(self, month: Optional[str] = None, signals: bool = True):
+        """
+        Return a pandas DataFrame of comments across one or all months.
+
+        Sources from ``threads.jsonl.gz`` so that thread-level features
+        (depth, thread size, time since submission, submission metadata) can
+        be joined onto each comment row.  Run :class:`~pushshiftreader.TreeBuilder`
+        first; months without ``threads.jsonl.gz`` are skipped with a warning.
+
+        When ``signals=True`` and a ``signals.csv`` exists for the month,
+        signal columns are left-joined onto the DataFrame automatically.
+        Records absent from ``signals.csv`` receive ``False`` / ``NaN`` for
+        all signal columns.
+
+        Args:
+            month: Specific month (``YYYY-MM``) or ``None`` for all months.
+            signals: Join signal columns from ``signals.csv`` when present.
+
+        Returns:
+            ``pandas.DataFrame`` with one row per comment, plus a leading
+            ``month`` column.  Returns an empty DataFrame if no data is found.
+
+        Requires ``pandas`` (``pip install pandas``).
+        """
+        try:
+            import pandas as pd
+        except ImportError:
+            raise ImportError(
+                "pandas is required for DataFrame export. "
+                "Install it with: pip install pandas"
+            )
+
+        months = [month] if month else self.months
+        dfs = []
+
+        for m in months:
+            threads_path = self._month_path(m) / 'threads.jsonl.gz'
+            if not threads_path.exists():
+                logger.warning(
+                    f"No threads.jsonl.gz for {m} — "
+                    "run TreeBuilder.build_month() first, skipping"
+                )
+                continue
+
+            month_frames = []
+            for thread in load_threads(threads_path):
+                df = thread.to_dataframe()
+                if not df.empty:
+                    month_frames.append(df)
+
+            if not month_frames:
+                continue
+
+            month_df = pd.concat(month_frames, ignore_index=True)
+            month_df.insert(0, 'month', m)
+
+            if signals:
+                signals_path = self._month_path(m) / 'signals.csv'
+                if signals_path.exists():
+                    sig_df = pd.read_csv(signals_path)
+                    comment_sigs = (
+                        sig_df[sig_df['record_type'] == 'comment']
+                        .drop(columns=['record_type'])
+                        .rename(columns={'record_id': 'id'})
+                    )
+                    if not comment_sigs.empty:
+                        month_df = month_df.merge(comment_sigs, on='id', how='left')
+
+            dfs.append(month_df)
+
+        if not dfs:
+            return pd.DataFrame()
+
+        return pd.concat(dfs, ignore_index=True)
+
+    def submissions_dataframe(self, month: Optional[str] = None, signals: bool = True):
+        """
+        Return a pandas DataFrame of submissions across one or all months.
+
+        When ``signals=True`` and a ``signals.csv`` exists for the month,
+        submission-type signal columns are left-joined automatically.
+
+        Args:
+            month: Specific month (``YYYY-MM``) or ``None`` for all months.
+            signals: Join signal columns from ``signals.csv`` when present.
+
+        Returns:
+            ``pandas.DataFrame`` with one row per submission, plus a leading
+            ``month`` column.  Returns an empty DataFrame if no data is found.
+
+        Requires ``pandas`` (``pip install pandas``).
+        """
+        try:
+            import pandas as pd
+        except ImportError:
+            raise ImportError(
+                "pandas is required for DataFrame export. "
+                "Install it with: pip install pandas"
+            )
+
+        months = [month] if month else self.months
+        dfs = []
+
+        for m in months:
+            rows = [sub.to_dict(include_extra=False) for sub in self.submissions(m)]
+            if not rows:
+                continue
+
+            month_df = pd.DataFrame(rows)
+            month_df.insert(0, 'month', m)
+
+            if signals:
+                signals_path = self._month_path(m) / 'signals.csv'
+                if signals_path.exists():
+                    sig_df = pd.read_csv(signals_path)
+                    sub_sigs = (
+                        sig_df[sig_df['record_type'] == 'submission']
+                        .drop(columns=['record_type'])
+                        .rename(columns={'record_id': 'id'})
+                    )
+                    if not sub_sigs.empty:
+                        month_df = month_df.merge(sub_sigs, on='id', how='left')
+
+            dfs.append(month_df)
+
+        if not dfs:
+            return pd.DataFrame()
+
+        return pd.concat(dfs, ignore_index=True)
+
     def month_stats(self, month: str) -> Dict[str, Any]:
         """Get statistics for a specific month."""
         month_path = self._month_path(month)
