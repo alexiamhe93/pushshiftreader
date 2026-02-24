@@ -128,19 +128,24 @@ class Submission:
     def from_dict(cls, data: dict) -> "Submission":
         """Create a Submission from a raw JSON dict."""
         known_fields = {f.name for f in cls.__dataclass_fields__.values() if f.name != '_extra'}
-        
+
         kwargs = {}
         extra = {}
-        
+
         for key, value in data.items():
             if key in known_fields:
                 kwargs[key] = value
             else:
                 extra[key] = value
-        
+
         kwargs['_extra'] = extra
         if 'created_utc' in kwargs:
             kwargs['created_utc'] = int(kwargs['created_utc'])
+        # Older Pushshift records occasionally store these as integers
+        for str_field in ('id', 'name', 'author', 'subreddit', 'subreddit_id',
+                          'title', 'selftext', 'url'):
+            if str_field in kwargs and kwargs[str_field] is not None:
+                kwargs[str_field] = str(kwargs[str_field])
         return cls(**kwargs)
 
     def to_dict(self, include_extra: bool = True) -> dict:
@@ -253,19 +258,24 @@ class Comment:
     def from_dict(cls, data: dict) -> "Comment":
         """Create a Comment from a raw JSON dict."""
         known_fields = {f.name for f in cls.__dataclass_fields__.values() if f.name != '_extra'}
-        
+
         kwargs = {}
         extra = {}
-        
+
         for key, value in data.items():
             if key in known_fields:
                 kwargs[key] = value
             else:
                 extra[key] = value
-        
+
         kwargs['_extra'] = extra
         if 'created_utc' in kwargs:
             kwargs['created_utc'] = int(kwargs['created_utc'])
+        # Older Pushshift records occasionally store these as integers
+        for str_field in ('link_id', 'parent_id', 'name', 'author',
+                          'subreddit', 'subreddit_id', 'body'):
+            if str_field in kwargs and kwargs[str_field] is not None:
+                kwargs[str_field] = str(kwargs[str_field])
         return cls(**kwargs)
 
     def to_dict(self, include_extra: bool = True) -> dict:
