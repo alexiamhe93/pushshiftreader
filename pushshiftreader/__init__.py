@@ -36,13 +36,21 @@ Signal Detection:
     from pushshiftreader import SignalDetector, Detector, RegexDetector
 
     class DeltaDetector(Detector):
-        def detect_comment(self, comment, thread):
+        def detect_comment(self, comment, thread, depth=0):
             return 'Δ' in comment.body or '!delta' in comment.body.lower()
 
     sd = SignalDetector(
         "./extracted/ChangeMyView",
         detectors=[DeltaDetector("delta_awarded")],
     )
+    sd.run_all_months()
+
+Signal Detection Presets:
+    from pushshiftreader import get_detectors, SignalDetector
+
+    # Built-in presets: 'general', 'cmv'/'changemyview', 'aita'/'amitheasshole'
+    sd = SignalDetector("./extracted/ChangeMyView",
+                        detectors=get_detectors('cmv'))
     sd.run_all_months()
 
 Graph Export:
@@ -107,6 +115,19 @@ from .signals import (
     AuthorIsOPDetector,
 )
 
+# Signal detection presets
+from .presets import (
+    get_detectors,
+    StickiedCommentDetector,
+    ModDistinguishedDetector,
+    ContentRemovedDetector,
+    AuthorDeletedDetector,
+    TopLevelCommentDetector,
+    DepthDetector,
+    DeltaAwardedDetector,
+    AITAVerdictDetector,
+)
+
 # Utilities
 from .utils import (
     setup_logging,
@@ -130,11 +151,22 @@ __all__ = [
     'SubredditData',
     'SignalDetector',
 
-    # Signal detectors
+    # Signal detectors (built-in)
     'Detector',
     'RegexDetector',
     'ScoreDetector',
     'AuthorIsOPDetector',
+
+    # Signal detector presets
+    'get_detectors',
+    'StickiedCommentDetector',
+    'ModDistinguishedDetector',
+    'ContentRemovedDetector',
+    'AuthorDeletedDetector',
+    'TopLevelCommentDetector',
+    'DepthDetector',
+    'DeltaAwardedDetector',
+    'AITAVerdictDetector',
     
     # Result types
     'ExtractionResult',

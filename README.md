@@ -12,6 +12,7 @@ A Python module for extracting and analyzing Reddit data from Pushshift archives
 - **Author statistics** — Per-author activity counts, scores, and date ranges written to CSV
 - **Reconstruct comment trees** — Rebuild threaded conversations with nested replies
 - **Signal detection** — Annotate threads with custom boolean signals; ships with built-in detectors for regex, score thresholds, and OP participation
+- **Signal detection presets** — One-call `get_detectors(preset)` factory with ready-made detectors for mod/admin actions, thread dynamics, CMV delta awards, and AITA verdicts
 - **DataFrame export** — One-line export to pandas with thread-level features (depth, thread size, response time, submission metadata) joined in; optional signals join
 - **Graph export** — Export conversation graphs (comment→reply) and author-interaction graphs (who replies to whom) as node/edge CSV files
 - **Multiple output formats** — CSV for easy analysis, compressed JSON for full fidelity
@@ -205,16 +206,8 @@ from pushshiftreader import SignalDetector, Detector, RegexDetector, AuthorIsOPD
 
 class DeltaDetector(Detector):
     """Fires when a comment contains a delta award (CMV convention)."""
-    def detect_comment(self, comment, thread):
+    def detect_comment(self, comment, thread, depth=0):
         return 'Δ' in comment.body or '!delta' in comment.body.lower()
-
-class VerdictDetector(Detector):
-    """Fires when a top-level comment contains an AITA verdict token."""
-    import re
-    _VERDICTS = re.compile(r'\b(NTA|YTA|ESH|NAH|INFO)\b')
-
-    def detect_comment(self, comment, thread):
-        return bool(self._VERDICTS.search(comment.body)) and comment.is_top_level
 
 sd = SignalDetector(
     "./extracted/ChangeMyView",
@@ -246,7 +239,52 @@ results = sd.run_all_months()
 
 Join with `comments.csv` on `record_id`; a missing row means all signals are `False`.
 
-### 8. Export to pandas DataFrame
+### 8. Signal Detection Presets
+
+Instead of defining detectors from scratch, use `get_detectors()` to get a
+ready-made list for common scenarios:
+
+```python
+from pushshiftreader import get_detectors, SignalDetector
+
+# General preset: mod/admin actions + thread dynamics (works for any subreddit)
+sd = SignalDetector("./extracted/AskHistorians",
+                    detectors=get_detectors('general'))
+sd.run_all_months()
+
+# CMV preset: general + delta award detection
+sd = SignalDetector("./extracted/ChangeMyView",
+                    detectors=get_detectors('cmv'))
+sd.run_all_months()
+
+# AITA preset: general + verdict keyword detection
+sd = SignalDetector("./extracted/AmITheAsshole",
+                    detectors=get_detectors('aita'))
+sd.run_all_months()
+```
+
+**Available presets:**
+
+| Preset | Alias | Signals included |
+|---|---|---|
+| `'general'` | — | `stickied_comment`, `mod_distinguished`, `content_removed`, `author_deleted`, `top_level_comment`, `op_comment` |
+| `'cmv'` | `'changemyview'` | All general signals + `delta_awarded` |
+| `'aita'` | `'amitheasshole'` | All general signals + `aita_verdict` |
+
+**All preset detector classes** (can be used individually too):
+
+| Class | Signal fires when… |
+|---|---|
+| `StickiedCommentDetector` | Comment is stickied |
+| `ModDistinguishedDetector` | Comment/submission is distinguished by mod or admin |
+| `ContentRemovedDetector` | Body is `[removed]` or `removed_by_category` is set |
+| `AuthorDeletedDetector` | Author is `[deleted]` or body is `[deleted]` |
+| `TopLevelCommentDetector` | Comment is a direct reply to the submission |
+| `DepthDetector(name, min_depth, max_depth)` | Comment depth falls within the given range |
+| `DeltaAwardedDetector` | Comment contains `Δ` or `!delta` (CMV) |
+| `AITAVerdictDetector` | Comment contains `NTA`/`YTA`/`ESH`/`NAH`/`INFO` (AITA) |
+
+### 9. Export to pandas DataFrame
 
 After building trees, export comments or submissions to a pandas DataFrame
 with thread-level features automatically joined in.
@@ -293,7 +331,7 @@ for thread in data.threads("2019-06"):
     high_scoring = df[df['score'] > 50]
 ```
 
-### 9. Export Graphs
+### 10. Export Graphs
 
 Export conversation structure or author-interaction networks as node/edge CSV files,
 ready for Gephi, NetworkX, or any graph tool.
@@ -366,7 +404,7 @@ for thread in data.threads("2019-06"):
 | `weight` | Number of times source replied to target |
 | `first_interaction_utc` | Timestamp of first interaction |
 
-### 10. Load and Analyze
+### 11. Load and Analyze
 
 ```python
 from pushshiftreader import load_subreddit
@@ -429,7 +467,8 @@ extracted/
     │   ├── submissions.jsonl.gz # Compressed JSON lines
     │   ├── comments.csv
     │   ├── comments.jsonl.gz
-    │   └── threads.jsonl.gz    # Nested thread structures (after build-trees)
+    │   ├── threads.jsonl.gz    # Nested thread structures (after build-trees)
+    │   └── signals.csv         # Signal detection results (after signal detection)
     ├── 2023-02/
     │   └── ...
     └── ...
@@ -496,9 +535,16 @@ Abstract base class for custom signals.  Override either or both methods:
 
 ```python
 class MyDetector(Detector):
-    def detect_comment(self, comment: Comment, thread: Thread) -> bool: ...
-    def detect_submission(self, submission: Submission, thread: Thread) -> bool: ...
+    def detect_comment(self, comment: Comment, thread: Thread, depth: int = 0) -> bool: ...
+    def detect_submission(self, submission: Submission, thread: Thread, depth: int = 0) -> bool: ...
 ```
+
+The `depth` parameter (0 = top-level comment) is passed automatically by `SignalDetector`.
+
+#### `get_detectors(preset='general')`
+
+Factory returning a ready-to-use list of `Detector` instances for a named preset.
+Presets: `'general'`, `'cmv'`/`'changemyview'`, `'aita'`/`'amitheasshole'`.
 
 #### `SubredditData`
 
@@ -630,6 +676,7 @@ pushshiftreader/
 ├── extractor.py         # Main subreddit extraction engine
 ├── trees.py             # Comment tree reconstruction with SQLite
 ├── signals.py           # Signal detection framework and built-in detectors
+├── presets.py           # Built-in detector presets and get_detectors() factory
 ├── loader.py            # Clean API for loading extracted data
 ├── cli.py               # Command-line interface
 pyproject.toml           # Package configuration

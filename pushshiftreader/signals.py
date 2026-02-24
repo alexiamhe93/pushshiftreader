@@ -12,7 +12,7 @@ Example usage::
     from pushshiftreader import SignalDetector, Detector, RegexDetector
 
     class DeltaDetector(Detector):
-        def detect_comment(self, comment, thread):
+        def detect_comment(self, comment, thread, depth=0):
             return 'Δ' in comment.body or '!delta' in comment.body.lower()
 
     sd = SignalDetector(
@@ -60,7 +60,7 @@ class Detector(ABC):
     Example::
 
         class LongCommentDetector(Detector):
-            def detect_comment(self, comment, thread):
+            def detect_comment(self, comment, thread, depth=0):
                 return len(comment.body) > 2000
     """
 
@@ -72,11 +72,11 @@ class Detector(ABC):
         """
         self.name = name
 
-    def detect_comment(self, comment: Comment, thread: Thread) -> bool:
+    def detect_comment(self, comment: Comment, thread: Thread, depth: int = 0) -> bool:
         """Return True if this signal fires for the given comment."""
         return False
 
-    def detect_submission(self, submission: Submission, thread: Thread) -> bool:
+    def detect_submission(self, submission: Submission, thread: Thread, depth: int = 0) -> bool:
         """Return True if this signal fires for the given submission."""
         return False
 
@@ -134,7 +134,7 @@ class RegexDetector(Detector):
         self._record_type = record_type
         self._fields = fields
 
-    def detect_comment(self, comment: Comment, thread: Thread) -> bool:
+    def detect_comment(self, comment: Comment, thread: Thread, depth: int = 0) -> bool:
         if self._record_type not in ("comment", "both"):
             return False
         fields = self._fields or ["body"]
@@ -143,7 +143,7 @@ class RegexDetector(Detector):
             for f in fields
         )
 
-    def detect_submission(self, submission: Submission, thread: Thread) -> bool:
+    def detect_submission(self, submission: Submission, thread: Thread, depth: int = 0) -> bool:
         if self._record_type not in ("submission", "both"):
             return False
         fields = self._fields or ["title", "selftext"]
@@ -200,12 +200,12 @@ class ScoreDetector(Detector):
             return False
         return True
 
-    def detect_comment(self, comment: Comment, thread: Thread) -> bool:
+    def detect_comment(self, comment: Comment, thread: Thread, depth: int = 0) -> bool:
         if self._record_type not in ("comment", "both"):
             return False
         return self._check(comment.score)
 
-    def detect_submission(self, submission: Submission, thread: Thread) -> bool:
+    def detect_submission(self, submission: Submission, thread: Thread, depth: int = 0) -> bool:
         if self._record_type not in ("submission", "both"):
             return False
         return self._check(submission.score)
@@ -225,7 +225,7 @@ class AuthorIsOPDetector(Detector):
         AuthorIsOPDetector("op_comment")
     """
 
-    def detect_comment(self, comment: Comment, thread: Thread) -> bool:
+    def detect_comment(self, comment: Comment, thread: Thread, depth: int = 0) -> bool:
         op = thread.submission.author
         if not op or op == "[deleted]":
             return False
@@ -259,7 +259,7 @@ class SignalDetector:
         )
 
         class DeltaDetector(Detector):
-            def detect_comment(self, comment, thread):
+            def detect_comment(self, comment, thread, depth=0):
                 return 'Δ' in comment.body or '!delta' in comment.body.lower()
 
         sd = SignalDetector(
@@ -350,9 +350,9 @@ class SignalDetector:
                     rows_written += 1
 
                 # --- every comment in the thread (depth-first) ---
-                for comment, _ in thread.walk():
+                for comment, depth in thread.walk():
                     comment_signals = {
-                        d.name: d.detect_comment(comment, thread)
+                        d.name: d.detect_comment(comment, thread, depth)
                         for d in self.detectors
                     }
                     if any(comment_signals.values()):
