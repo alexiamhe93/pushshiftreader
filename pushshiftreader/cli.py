@@ -16,6 +16,8 @@ from .extractor import SubredditExtractor
 from .trees import TreeBuilder
 from .loader import load_subreddit
 from .utils import setup_logging, discover_archives, format_size
+from .catalogue import ArchiveCatalogue
+from .crosssub import CrossSubIndex
 
 
 def cmd_extract(args):
@@ -116,6 +118,46 @@ def cmd_list_archives(args):
     if archives:
         months = sorted(set(a.month_str for a in archives))
         print(f"\nDate range: {months[0]} to {months[-1]}")
+
+
+def cmd_catalogue(args):
+    """Build a per-(subreddit, month) statistics catalogue from raw archives."""
+    cat = ArchiveCatalogue(
+        archive_path=args.archive,
+        output_path=args.output,
+        show_progress=not args.quiet,
+    )
+
+    result = cat.run(
+        start_month=args.start_month,
+        end_month=args.end_month,
+        min_activity=args.min_activity,
+    )
+
+    print(f"\nCatalogue complete!")
+    print(f"  Months processed:  {result['months_processed']}")
+    print(f"  Subreddits seen:   {result['subreddits_seen']:,}")
+    print(f"  Rows written:      {result['rows_written']:,}")
+    print(f"  Output:            {args.output}")
+
+
+def cmd_cross_sub_index(args):
+    """Build a cross-subreddit author index from extracted subreddit directories."""
+    if args.subreddits:
+        idx = CrossSubIndex.from_directory(
+            extracted_dir=args.extracted,
+            subreddits=args.subreddits,
+        )
+    else:
+        idx = CrossSubIndex.from_directory(extracted_dir=args.extracted)
+
+    idx.build(min_subreddits=args.min_subreddits)
+    result = idx.save(output_dir=args.output)
+
+    print(f"\nCross-subreddit index complete!")
+    print(f"  Authors found:     {result['authors']:,}")
+    print(f"  Activity rows:     {result['pairs']:,}")
+    print(f"  Output directory:  {args.output}")
 
 
 def main():
@@ -238,6 +280,73 @@ def main():
         help='Path to extracted subreddit directory'
     )
     
+    # Catalogue command
+    catalogue_parser = subparsers.add_parser(
+        'catalogue',
+        help='Build a per-(subreddit, month) statistics catalogue from raw archives'
+    )
+    catalogue_parser.add_argument(
+        '--archive', '-a',
+        type=Path,
+        required=True,
+        help='Path to archive directory (containing comments/ and submissions/)'
+    )
+    catalogue_parser.add_argument(
+        '--output', '-o',
+        type=Path,
+        required=True,
+        help='Output CSV file path (e.g. catalogue.csv)'
+    )
+    catalogue_parser.add_argument(
+        '--start-month',
+        help='Start month (YYYY-MM), inclusive'
+    )
+    catalogue_parser.add_argument(
+        '--end-month',
+        help='End month (YYYY-MM), inclusive'
+    )
+    catalogue_parser.add_argument(
+        '--min-activity',
+        type=int,
+        default=1,
+        metavar='N',
+        help=(
+            'Skip subreddits with fewer than N total records '
+            '(submissions + comments) in a month (default: 1)'
+        )
+    )
+
+    # Cross-subreddit index command
+    crosssub_parser = subparsers.add_parser(
+        'cross-sub-index',
+        help='Find authors active across multiple extracted subreddits'
+    )
+    crosssub_parser.add_argument(
+        '--extracted', '-e',
+        type=Path,
+        required=True,
+        help='Root directory of extracted subreddit data'
+    )
+    crosssub_parser.add_argument(
+        '--subreddits', '-s',
+        nargs='+',
+        metavar='SUBREDDIT',
+        help='Limit to these subreddits (default: all dirs with authors.csv)'
+    )
+    crosssub_parser.add_argument(
+        '--output', '-o',
+        type=Path,
+        required=True,
+        help='Output directory for author_activity.csv and author_summary.csv'
+    )
+    crosssub_parser.add_argument(
+        '--min-subreddits',
+        type=int,
+        default=2,
+        metavar='N',
+        help='Minimum subreddits an author must appear in (default: 2)'
+    )
+
     # List archives command
     list_parser = subparsers.add_parser(
         'list-archives',
@@ -276,6 +385,10 @@ def main():
         cmd_info(args)
     elif args.command == 'list-archives':
         cmd_list_archives(args)
+    elif args.command == 'catalogue':
+        cmd_catalogue(args)
+    elif args.command == 'cross-sub-index':
+        cmd_cross_sub_index(args)
     else:
         parser.print_help()
         sys.exit(1)

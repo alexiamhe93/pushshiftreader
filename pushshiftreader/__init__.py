@@ -128,6 +128,10 @@ from .presets import (
     AITAVerdictDetector,
 )
 
+# Archive catalogue and cross-subreddit index
+from .catalogue import ArchiveCatalogue
+from .crosssub import CrossSubIndex
+
 # Utilities
 from .utils import (
     setup_logging,
@@ -173,6 +177,10 @@ __all__ = [
     'ExtractionStats',
     'SubredditMetadata',
     
+    # Higher-level analysis classes
+    'ArchiveCatalogue',
+    'CrossSubIndex',
+
     # Functions
     'load_subreddit',
     'load_threads',

@@ -17,6 +17,8 @@ A Python module for extracting and analyzing Reddit data from Pushshift archives
 - **Graph export** — Export conversation graphs (comment→reply) and author-interaction graphs (who replies to whom) as node/edge CSV files
 - **Multiple output formats** — CSV for easy analysis, compressed JSON for full fidelity
 - **Simple API** — Clean Python interface for research workflows
+- **Archive catalogue** — Single streaming pass over raw dumps to build a per-(subreddit, month) stats table (post counts + unique authors); resumable
+- **Cross-subreddit author index** — Find authors active across multiple subreddits from already-extracted `authors.csv` files; no re-streaming required
 
 ## Installation
 
@@ -435,6 +437,66 @@ for thread in data.threads("2023-01"):
         print(f"{indent}{comment.author}: {comment.body[:50]}...")
 ```
 
+### 10. Build an Archive Catalogue
+
+Scan all raw archives and produce a single CSV table with per-(subreddit, month)
+record counts and unique author totals.  The pass is resumable — re-running
+skips already-processed months automatically.
+
+```python
+from pushshiftreader import ArchiveCatalogue
+
+cat = ArchiveCatalogue(
+    archive_path="/path/to/dumps",
+    output_path="catalogue.csv",
+)
+
+result = cat.run(
+    start_month="2013-01",   # optional
+    end_month="2013-06",     # optional
+    min_activity=10,         # skip subreddits with < 10 records in a month
+)
+print(f"Wrote {result['rows_written']:,} rows for {result['subreddits_seen']:,} subreddits")
+```
+
+Output CSV columns: `subreddit, month, n_submissions, n_comments, n_unique_authors`
+
+### 11. Cross-Subreddit Author Index
+
+Find authors who are active across multiple extracted subreddits.  Reads the
+already-aggregated `authors.csv` from each subreddit directory — no
+re-streaming of archives.
+
+```python
+from pushshiftreader import CrossSubIndex
+
+# Auto-discover all subreddit dirs that have an authors.csv
+idx = CrossSubIndex.from_directory("./extracted")
+idx.build(min_subreddits=2)   # keep authors in >= 2 subreddits
+result = idx.save("./crosssub/")
+print(f"{result['authors']:,} authors across {result['pairs']:,} subreddit pairs")
+```
+
+Or target specific subreddits:
+
+```python
+idx = CrossSubIndex.from_directory(
+    "./extracted",
+    subreddits=["AskHistorians", "AskScience", "science"],
+)
+idx.build(min_subreddits=2).save("./crosssub/")
+```
+
+**Output files** (written to `output_dir/`):
+
+| File | Description |
+|---|---|
+| `author_activity.csv` | One row per author × subreddit pair with activity stats |
+| `author_summary.csv` | One row per author — totals + pipe-separated subreddit list |
+
+`author_summary.csv` columns: `author, n_subreddits, subreddits, total_comments,
+total_submissions, total_months_active, first_seen_utc, last_seen_utc`
+
 ## Archive Structure
 
 The extractor expects Pushshift archives organized as:
@@ -651,6 +713,29 @@ pushshiftreader build-trees ./extracted/AskHistorians
 
 # View extracted data info
 pushshiftreader info ./extracted/AskHistorians -v
+
+# Build an archive catalogue (all subreddits, one month range)
+pushshiftreader catalogue \
+    --archive /path/to/dumps \
+    --output catalogue.csv \
+    --start-month 2013-01 \
+    --end-month 2013-12 \
+    --min-activity 10
+
+# Resume an interrupted catalogue run (already-processed months are skipped)
+pushshiftreader catalogue --archive /path/to/dumps --output catalogue.csv
+
+# Cross-subreddit author index (all extracted subreddits)
+pushshiftreader cross-sub-index \
+    --extracted ./extracted \
+    --output ./crosssub/
+
+# Limit to specific subreddits and require >= 3 common subreddits
+pushshiftreader cross-sub-index \
+    --extracted ./extracted \
+    --subreddits AskHistorians AskScience science \
+    --output ./crosssub/ \
+    --min-subreddits 3
 ```
 
 ## Tips for Large Archives
@@ -678,6 +763,8 @@ pushshiftreader/
 ├── signals.py           # Signal detection framework and built-in detectors
 ├── presets.py           # Built-in detector presets and get_detectors() factory
 ├── loader.py            # Clean API for loading extracted data
+├── catalogue.py         # Archive catalogue builder (ArchiveCatalogue)
+├── crosssub.py          # Cross-subreddit author index (CrossSubIndex)
 ├── cli.py               # Command-line interface
 pyproject.toml           # Package configuration
 ```
