@@ -6,6 +6,8 @@ whose text contains the given regex pattern, writing results to per-month
 output files. Supports resumable runs and parallel workers.
 """
 
+import csv
+import gzip
 import json
 import logging
 import re
@@ -435,6 +437,18 @@ class WordSearcher:
         logger.info(f"Duration: {format_duration(total_duration)}")
         return result
 
+    def assemble_results(self) -> Dict[str, int]:
+        """
+        Assemble all per-month search outputs into two flat CSVs.
+
+        Convenience wrapper around :func:`assemble_search_results` that uses
+        this searcher's ``output_path``.
+
+        Returns:
+            Dict with ``"comments"`` and ``"submissions"`` row counts.
+        """
+        return assemble_search_results(self.output_path)
+
     def _make_pbar(self, archive: ArchiveFile):
         """Create a tqdm progress bar for an archive file, or return None."""
         if not self.show_progress:
@@ -601,3 +615,134 @@ class WordSearcher:
         logger.info(f"Matched: {total_comments:,} comments, {total_submissions:,} submissions")
         logger.info(f"Duration: {format_duration(total_duration)}")
         return result
+
+
+def _iter_month_records(month_dir: Path, record_type: str) -> Iterator[dict]:
+    """
+    Yield records from a single month directory for the given record type.
+
+    Prefers the compressed JSONL file; falls back to CSV if only that format
+    was written during the search.
+    """
+    jsonl_path = month_dir / f"{record_type}.jsonl.gz"
+    csv_path = month_dir / f"{record_type}.csv"
+
+    if jsonl_path.exists():
+        with gzip.open(jsonl_path, 'rt', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        yield json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+    elif csv_path.exists():
+        with open(csv_path, 'r', newline='', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            yield from reader
+
+
+def _discover_search_months(output_path: Path) -> List[str]:
+    """
+    Return sorted list of completed month directories in a WordSearcher output path.
+
+    A directory is considered complete if it looks like YYYY-MM and contains
+    a metadata.json file.
+    """
+    months = []
+    for item in Path(output_path).iterdir():
+        if not item.is_dir():
+            continue
+        parts = item.name.split('-')
+        if len(parts) == 2 and len(parts[0]) == 4 and len(parts[1]) == 2:
+            if (item / 'metadata.json').exists():
+                months.append(item.name)
+    return sorted(months)
+
+
+def assemble_search_results(output_path: Path) -> Dict[str, int]:
+    """
+    Assemble per-month WordSearcher outputs into two flat CSV files.
+
+    Reads all ``comments.jsonl.gz`` (or ``comments.csv``) and
+    ``submissions.jsonl.gz`` (or ``submissions.csv``) files from the
+    completed month subdirectories of ``output_path``, prepends a ``month``
+    column to every row, and writes:
+
+    - ``output_path/comments.csv``   — all matching comments
+    - ``output_path/submissions.csv`` — all matching submissions
+
+    Only months that have a ``metadata.json`` completion marker are included,
+    so a partial/interrupted search can still be assembled safely.
+
+    Args:
+        output_path: Root directory produced by :class:`WordSearcher`
+            (the same path passed as ``output_path`` to the searcher).
+
+    Returns:
+        Dict with ``"comments"`` and ``"submissions"`` row counts.
+
+    Example::
+
+        from pushshiftreader import WordSearcher
+        from pushshiftreader.searcher import assemble_search_results
+
+        searcher = WordSearcher(
+            archive_path="/data/dumps",
+            output_path="./results/nudge",
+            pattern=r"nudg",
+        )
+        searcher.run()
+        counts = searcher.assemble_results()
+        # writes ./results/nudge/comments.csv and ./results/nudge/submissions.csv
+        print(counts)  # {'comments': 42318, 'submissions': 1204}
+    """
+    output_path = Path(output_path)
+    months = _discover_search_months(output_path)
+
+    if not months:
+        logger.warning(f"No completed months found in {output_path}")
+        return {'comments': 0, 'submissions': 0}
+
+    logger.info(f"Assembling {len(months)} months from {output_path}")
+
+    comment_fields = ['month'] + COMMENT_CSV_FIELDS
+    submission_fields = ['month'] + SUBMISSION_CSV_FIELDS
+
+    comments_out = output_path / 'comments.csv'
+    submissions_out = output_path / 'submissions.csv'
+
+    comment_count = 0
+    submission_count = 0
+
+    with (
+        open(comments_out, 'w', newline='', encoding='utf-8') as cf,
+        open(submissions_out, 'w', newline='', encoding='utf-8') as sf,
+    ):
+        comment_writer = csv.DictWriter(
+            cf, fieldnames=comment_fields, extrasaction='ignore'
+        )
+        submission_writer = csv.DictWriter(
+            sf, fieldnames=submission_fields, extrasaction='ignore'
+        )
+        comment_writer.writeheader()
+        submission_writer.writeheader()
+
+        for month in months:
+            month_dir = output_path / month
+
+            for record in _iter_month_records(month_dir, 'comments'):
+                record['month'] = month
+                comment_writer.writerow(record)
+                comment_count += 1
+
+            for record in _iter_month_records(month_dir, 'submissions'):
+                record['month'] = month
+                submission_writer.writerow(record)
+                submission_count += 1
+
+    logger.info(
+        f"Wrote {comment_count:,} comments → {comments_out.name}, "
+        f"{submission_count:,} submissions → {submissions_out.name}"
+    )
+    return {'comments': comment_count, 'submissions': submission_count}

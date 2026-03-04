@@ -133,7 +133,7 @@ from .catalogue import ArchiveCatalogue
 from .crosssub import CrossSubIndex
 
 # Cross-dataset word/pattern search
-from .searcher import WordSearcher, SearchResult, SearchStats
+from .searcher import WordSearcher, SearchResult, SearchStats, assemble_search_results
 
 # Utilities
 from .utils import (
@@ -188,6 +188,7 @@ __all__ = [
     'WordSearcher',
     'SearchResult',
     'SearchStats',
+    'assemble_search_results',
 
     # Functions
     'load_subreddit',
