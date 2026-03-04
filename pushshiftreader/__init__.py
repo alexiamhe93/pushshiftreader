@@ -132,6 +132,9 @@ from .presets import (
 from .catalogue import ArchiveCatalogue
 from .crosssub import CrossSubIndex
 
+# Cross-dataset word/pattern search
+from .searcher import WordSearcher, SearchResult, SearchStats
+
 # Utilities
 from .utils import (
     setup_logging,
@@ -180,6 +183,11 @@ __all__ = [
     # Higher-level analysis classes
     'ArchiveCatalogue',
     'CrossSubIndex',
+
+    # Word/pattern search
+    'WordSearcher',
+    'SearchResult',
+    'SearchStats',
 
     # Functions
     'load_subreddit',

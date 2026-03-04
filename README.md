@@ -19,6 +19,7 @@ A Python module for extracting and analyzing Reddit data from Pushshift archives
 - **Simple API** — Clean Python interface for research workflows
 - **Archive catalogue** — Single streaming pass over raw dumps to build a per-(subreddit, month) stats table (post counts + unique authors); resumable
 - **Cross-subreddit author index** — Find authors active across multiple subreddits from already-extracted `authors.csv` files; no re-streaming required
+- **Cross-dataset word search** — Search any regex pattern across the entire archive (all subreddits, all months) and collect every matching comment or post with full metadata; resumable and parallelisable
 
 ## Installation
 
@@ -437,7 +438,7 @@ for thread in data.threads("2023-01"):
         print(f"{indent}{comment.author}: {comment.body[:50]}...")
 ```
 
-### 10. Build an Archive Catalogue
+### 12. Build an Archive Catalogue
 
 Scan all raw archives and produce a single CSV table with per-(subreddit, month)
 record counts and unique author totals.  The pass is resumable — re-running
@@ -461,7 +462,7 @@ print(f"Wrote {result['rows_written']:,} rows for {result['subreddits_seen']:,} 
 
 Output CSV columns: `subreddit, month, n_submissions, n_comments, n_unique_authors`
 
-### 11. Cross-Subreddit Author Index
+### 13. Cross-Subreddit Author Index
 
 Find authors who are active across multiple extracted subreddits.  Reads the
 already-aggregated `authors.csv` from each subreddit directory — no
@@ -496,6 +497,96 @@ idx.build(min_subreddits=2).save("./crosssub/")
 
 `author_summary.csv` columns: `author, n_subreddits, subreddits, total_comments,
 total_submissions, total_months_active, first_seen_utc, last_seen_utc`
+
+### 14. Search Across All Archives
+
+`WordSearcher` scans every monthly archive file (all subreddits, all time) for a
+regex pattern and collects every matching comment or submission.  Useful for
+tracking how a word or phrase has been used across Reddit over time.
+
+```python
+from pushshiftreader import WordSearcher
+
+searcher = WordSearcher(
+    archive_path="/path/to/reddit_dumps",
+    output_path="./search_results/nudge",
+    pattern=r"nudg",          # matches nudge, nudged, nudging, nudger …
+)
+
+result = searcher.run()
+print(f"Found {result.total_comments:,} comments, "
+      f"{result.total_submissions:,} submissions "
+      f"across {result.months_processed} months")
+```
+
+**Date-range filtering:**
+
+```python
+result = searcher.run(start_month="2015-01", end_month="2020-12")
+```
+
+**Parallel workers:**
+
+```python
+searcher = WordSearcher(
+    archive_path="/path/to/reddit_dumps",
+    output_path="./search_results/nudge",
+    pattern=r"nudg",
+    workers=-1,   # use all CPU cores
+)
+result = searcher.run()
+```
+
+**Resumable** — like all other tools, runs are interruptible.  Each month
+writes a `metadata.json` completion marker; on restart, already-done months
+are skipped:
+
+```python
+# Just re-run the same searcher — completed months are skipped automatically
+result = searcher.run()
+
+# Force a full re-search (overwrites existing output)
+searcher = WordSearcher(..., force=True)
+```
+
+**Output layout:**
+
+```
+search_results/nudge/
+├── metadata.json           # Summary: pattern, total counts, duration
+├── 2015-01/
+│   ├── comments.jsonl.gz   # All matching comments (raw Pushshift records)
+│   ├── submissions.jsonl.gz
+│   └── metadata.json       # Month completion marker + match counts
+├── 2015-02/
+│   └── ...
+```
+
+Every output record is the raw JSON object from the archive — all fields are
+preserved (subreddit, author, score, created\_utc, body/title, etc.).
+
+**Constructor options:**
+
+```python
+WordSearcher(
+    archive_path: Path,              # Root archive directory
+    output_path: Path,               # Where to write results
+    pattern: str,                    # Regex pattern
+    case_sensitive: bool = False,    # Default: case-insensitive
+    search_comments: bool = True,
+    search_submissions: bool = True,
+    output_format: str = "jsonl",    # "csv", "jsonl", or "both"
+    workers: int = 1,                # Parallel processes (-1 = all cores)
+    force: bool = False,
+    show_progress: bool = True,
+)
+```
+
+**Performance note:** `WordSearcher` uses a two-stage filter — the raw NDJSON
+line is checked against the regex *before* JSON parsing.  Because the body/title
+text is embedded verbatim in the line, this skips JSON parsing for the vast
+majority of non-matching records, making the search significantly faster than
+parsing everything first.
 
 ## Archive Structure
 
@@ -602,6 +693,32 @@ class MyDetector(Detector):
 ```
 
 The `depth` parameter (0 = top-level comment) is passed automatically by `SignalDetector`.
+
+#### `WordSearcher`
+
+Searches all Pushshift archives for a regex pattern and collects matching records.
+
+```python
+searcher = WordSearcher(
+    archive_path: Path,              # Root archive directory
+    output_path: Path,               # Where to write results
+    pattern: str,                    # Regex pattern (case-insensitive by default)
+    case_sensitive: bool = False,
+    search_comments: bool = True,
+    search_submissions: bool = True,
+    output_format: str = "jsonl",    # "csv", "jsonl", or "both"
+    workers: int = 1,                # -1 = all CPU cores
+    force: bool = False,
+    show_progress: bool = True,
+)
+
+result = searcher.run(
+    start_month: str = None,   # Optional "YYYY-MM" filter
+    end_month: str = None,
+)
+# result.total_comments, result.total_submissions, result.months_processed
+# result.stats  → List[SearchStats] (per-month counts)
+```
 
 #### `get_detectors(preset='general')`
 
@@ -765,6 +882,7 @@ pushshiftreader/
 ├── loader.py            # Clean API for loading extracted data
 ├── catalogue.py         # Archive catalogue builder (ArchiveCatalogue)
 ├── crosssub.py          # Cross-subreddit author index (CrossSubIndex)
+├── searcher.py          # Cross-dataset word/pattern search (WordSearcher)
 ├── cli.py               # Command-line interface
 pyproject.toml           # Package configuration
 ```
