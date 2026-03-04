@@ -554,6 +554,8 @@ searcher = WordSearcher(..., force=True)
 ```
 search_results/nudge/
 ├── metadata.json           # Summary: pattern, total counts, duration
+├── comments.csv            # Assembled flat CSV (after assemble_results)
+├── submissions.csv         # Assembled flat CSV (after assemble_results)
 ├── 2015-01/
 │   ├── comments.jsonl.gz   # All matching comments (raw Pushshift records)
 │   ├── submissions.jsonl.gz
@@ -564,6 +566,31 @@ search_results/nudge/
 
 Every output record is the raw JSON object from the archive — all fields are
 preserved (subreddit, author, score, created\_utc, body/title, etc.).
+
+**Assemble results into flat CSVs:**
+
+After a search (or at any point during an interrupted run), call
+`assemble_results()` to merge all per-month files into two flat CSVs in the
+same directory:
+
+```python
+counts = searcher.assemble_results()
+# writes search_results/nudge/comments.csv
+#        search_results/nudge/submissions.csv
+print(counts)  # {'comments': 42318, 'submissions': 1204}
+```
+
+Or call the standalone function on any existing output directory:
+
+```python
+from pushshiftreader import assemble_search_results
+
+assemble_search_results("./search_results/nudge")
+```
+
+Each CSV has a leading `month` (YYYY-MM) column, followed by the standard
+comment or submission field set. Only months with a `metadata.json` completion
+marker are included, so it is safe to call mid-way through an interrupted run.
 
 **Constructor options:**
 
@@ -718,6 +745,28 @@ result = searcher.run(
 )
 # result.total_comments, result.total_submissions, result.months_processed
 # result.stats  → List[SearchStats] (per-month counts)
+
+counts = searcher.assemble_results()
+# Merges all per-month files → output_path/comments.csv + submissions.csv
+# counts == {'comments': N, 'submissions': M}
+```
+
+#### `assemble_search_results(output_path)`
+
+Standalone version of `WordSearcher.assemble_results()`. Reads all completed
+month subdirectories in `output_path` and writes two flat CSVs:
+
+- `output_path/comments.csv` — `month` + all comment fields
+- `output_path/submissions.csv` — `month` + all submission fields
+
+Prefers `.jsonl.gz` per month; falls back to `.csv`. Safe to call on a
+partial/interrupted search — only months with `metadata.json` are included.
+
+```python
+from pushshiftreader import assemble_search_results
+
+counts = assemble_search_results("./search_results/nudge")
+# {'comments': 42318, 'submissions': 1204}
 ```
 
 #### `get_detectors(preset='general')`
