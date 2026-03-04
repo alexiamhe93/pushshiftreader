@@ -20,6 +20,7 @@ A Python module for extracting and analyzing Reddit data from Pushshift archives
 - **Archive catalogue** — Single streaming pass over raw dumps to build a per-(subreddit, month) stats table (post counts + unique authors); resumable
 - **Cross-subreddit author index** — Find authors active across multiple subreddits from already-extracted `authors.csv` files; no re-streaming required
 - **Cross-dataset word search** — Search any regex pattern across the entire archive (all subreddits, all months) and collect every matching comment or post with full metadata; resumable and parallelisable
+- **Subreddit index** — One-row-per-subreddit CSV from the raw archives: post/comment counts, first/last active month, NSFW flag, and peak subscriber count; resumable
 
 ## Installation
 
@@ -498,7 +499,58 @@ idx.build(min_subreddits=2).save("./crosssub/")
 `author_summary.csv` columns: `author, n_subreddits, subreddits, total_comments,
 total_submissions, total_months_active, first_seen_utc, last_seen_utc`
 
-### 14. Search Across All Archives
+### 14. Build a Subreddit Index
+
+`SubredditIndex` makes a single streaming pass over the raw archives and
+produces one CSV file listing **every subreddit** in the dataset with
+aggregated statistics.
+
+```python
+from pushshiftreader import SubredditIndex
+
+idx = SubredditIndex(
+    archive_path="/path/to/reddit_dumps",
+    output_path="./subreddits.csv",
+)
+
+result = idx.run()
+print(f"Found {result['subreddits']:,} subreddits → {result['output_path']}")
+```
+
+**Date-range filtering** and **minimum activity threshold:**
+
+```python
+result = idx.run(
+    start_month="2015-01",
+    end_month="2022-12",
+    min_records=10,   # omit subreddits with fewer than 10 total posts/comments
+)
+```
+
+**Resumable** — intermediate per-month files are written to
+`subreddits_months/` alongside the output CSV.  Re-running automatically
+skips already-processed months:
+
+```python
+# Safe to re-run; completed months are skipped
+result = idx.run()
+```
+
+**Output columns:**
+
+| column | description |
+|---|---|
+| `subreddit` | Subreddit name |
+| `subreddit_id` | Reddit's internal subreddit ID |
+| `n_submissions` | Total submissions across all time |
+| `n_comments` | Total comments across all time |
+| `first_month` | Earliest month with any activity (YYYY-MM) |
+| `last_month` | Latest month with any activity (YYYY-MM) |
+| `months_active` | Number of distinct months with activity |
+| `over_18` | `True` if any submission was ever NSFW-tagged |
+| `subreddit_subscribers` | Peak subscriber count observed across all records |
+
+### 15. Search Across All Archives
 
 `WordSearcher` scans every monthly archive file (all subreddits, all time) for a
 regex pattern and collects every matching comment or submission.  Useful for
@@ -721,6 +773,30 @@ class MyDetector(Detector):
 
 The `depth` parameter (0 = top-level comment) is passed automatically by `SignalDetector`.
 
+#### `SubredditIndex`
+
+Builds a per-subreddit aggregated index from all raw Pushshift archives.
+
+```python
+idx = SubredditIndex(
+    archive_path: Path,          # Root archive directory
+    output_path: Path,           # Destination CSV (e.g. "subreddits.csv")
+    show_progress: bool = True,
+)
+
+result = idx.run(
+    start_month: str = None,     # Optional "YYYY-MM" filter
+    end_month: str = None,
+    min_records: int = 1,        # Exclude subreddits below this activity threshold
+)
+# result['subreddits']        → number of subreddits written
+# result['months_processed']  → months processed in this run
+# result['output_path']       → path to the final CSV
+```
+
+Intermediate per-month files are stored in `<output_path.stem>_months/`
+alongside the output CSV and are used for resumability.
+
 #### `WordSearcher`
 
 Searches all Pushshift archives for a regex pattern and collects matching records.
@@ -929,7 +1005,7 @@ pushshiftreader/
 ├── signals.py           # Signal detection framework and built-in detectors
 ├── presets.py           # Built-in detector presets and get_detectors() factory
 ├── loader.py            # Clean API for loading extracted data
-├── catalogue.py         # Archive catalogue builder (ArchiveCatalogue)
+├── catalogue.py         # Archive catalogue builder (ArchiveCatalogue, SubredditIndex)
 ├── crosssub.py          # Cross-subreddit author index (CrossSubIndex)
 ├── searcher.py          # Cross-dataset word/pattern search (WordSearcher)
 ├── cli.py               # Command-line interface

@@ -129,7 +129,7 @@ from .presets import (
 )
 
 # Archive catalogue and cross-subreddit index
-from .catalogue import ArchiveCatalogue
+from .catalogue import ArchiveCatalogue, SubredditIndex
 from .crosssub import CrossSubIndex
 
 # Cross-dataset word/pattern search
@@ -182,6 +182,7 @@ __all__ = [
     
     # Higher-level analysis classes
     'ArchiveCatalogue',
+    'SubredditIndex',
     'CrossSubIndex',
 
     # Word/pattern search
