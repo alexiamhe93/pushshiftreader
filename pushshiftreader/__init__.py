@@ -1,213 +1,115 @@
 """
-pushshiftreader - Extract and analyze Reddit data from Pushshift archives.
+pushshiftreader
 
-A Python module for working with Pushshift Reddit data dumps, providing:
-- Streaming decompression of .zst archives
-- Subreddit-specific data extraction  
-- Comment tree reconstruction
-- CSV and compressed JSON output
-
-Quick Start:
-    from pushshiftreader import SubredditExtractor, TreeBuilder, load_subreddit
-    
-    # Extract subreddit data from archives
-    extractor = SubredditExtractor(
-        archive_path="/path/to/reddit_dumps",
-        output_path="./extracted",
-        subreddits=["AskHistorians", "science"]
-    )
-    extractor.run()
-    
-    # Build comment trees
-    builder = TreeBuilder("./extracted/AskHistorians")
-    builder.build_all_months()
-    
-    # Load and analyze
-    data = load_subreddit("./extracted/AskHistorians")
-    for thread in data.threads("2023-01"):
-        print(f"{thread.submission.title}: {thread.comment_count} comments")
-
-Command Line:
-    python -m pushshiftreader extract --archive /path/to/dumps --output ./out --subreddits AskHistorians
-    python -m pushshiftreader build-trees ./out/AskHistorians
-    python -m pushshiftreader info ./out/AskHistorians
-
-Signal Detection:
-    from pushshiftreader import SignalDetector, Detector, RegexDetector
-
-    class DeltaDetector(Detector):
-        def detect_comment(self, comment, thread, depth=0):
-            return 'Δ' in comment.body or '!delta' in comment.body.lower()
-
-    sd = SignalDetector(
-        "./extracted/ChangeMyView",
-        detectors=[DeltaDetector("delta_awarded")],
-    )
-    sd.run_all_months()
-
-Signal Detection Presets:
-    from pushshiftreader import get_detectors, SignalDetector
-
-    # Built-in presets: 'general', 'cmv'/'changemyview', 'aita'/'amitheasshole'
-    sd = SignalDetector("./extracted/ChangeMyView",
-                        detectors=get_detectors('cmv'))
-    sd.run_all_months()
-
-Graph Export:
-    data = load_subreddit("./extracted/ChangeMyView")
-    data.export_comment_graph("./graphs/")   # comment_graph_nodes.csv + edges.csv
-    data.export_author_graph("./graphs/")    # author_graph_nodes.csv + edges.csv
+Canonical subreddit extraction, keyword-set tracking, and thread-aware analysis
+for Pushshift Reddit archives.
 """
 
-__version__ = "0.3.0"
-__author__ = "Your Name"
+__version__ = "1.0.0"
+__author__ = "alexiamhe93"
 
-# Core data models
-from .models import (
-    Submission,
-    Comment,
-    Thread,
-    CommentNode
-)
-
-# Main extraction and processing classes
-from .extractor import (
-    SubredditExtractor,
-    ExtractionResult,
-    ExtractionStats
-)
-
-from .trees import (
-    TreeBuilder,
-    load_threads
-)
-
-# Data loading
-from .loader import (
-    load_subreddit,
-    SubredditData,
-    SubredditMetadata
-)
-
-# Low-level reader (for custom processing)
-from .reader import (
-    read_zst_records,
-    read_zst_lines,
-    ZstReader,
-    ReadProgress
-)
-
-# Writers (for custom output)
-from .writers import (
-    CsvWriter,
-    JsonlWriter,
-    StreamingThreadWriter,
-    SUBMISSION_CSV_FIELDS,
-    COMMENT_CSV_FIELDS
-)
-
-# Signal detection
-from .signals import (
-    Detector,
-    SignalDetector,
-    RegexDetector,
-    ScoreDetector,
-    AuthorIsOPDetector,
-)
-
-# Signal detection presets
-from .presets import (
-    get_detectors,
-    StickiedCommentDetector,
-    ModDistinguishedDetector,
-    ContentRemovedDetector,
-    AuthorDeletedDetector,
-    TopLevelCommentDetector,
-    DepthDetector,
-    DeltaAwardedDetector,
-    AITAVerdictDetector,
-)
-
-# Archive catalogue and cross-subreddit index
+from .analysis import build_smoke_report
 from .catalogue import ArchiveCatalogue, SubredditIndex
 from .crosssub import CrossSubIndex
-
-# Cross-dataset word/pattern search
-from .searcher import WordSearcher, SearchResult, SearchStats, assemble_search_results
-
-# Utilities
-from .utils import (
-    setup_logging,
-    discover_archives,
-    ArchiveFile
+from .extractor import ExtractionResult, ExtractionStats, SubredditExtractor
+from .loader import (
+    CorpusDataset,
+    CorpusMetadata,
+    SubredditData,
+    SubredditMetadata,
+    load_corpus,
+    load_subreddit,
 )
+from .models import Comment, CommentNode, Submission, Thread
+from .presets import (
+    AITAVerdictDetector,
+    AuthorDeletedDetector,
+    ContentRemovedDetector,
+    DeltaAwardedDetector,
+    DepthDetector,
+    ModDistinguishedDetector,
+    StickiedCommentDetector,
+    TopLevelCommentDetector,
+    get_detectors,
+)
+from .reader import ReadProgress, ZstReader, count_records, read_zst_lines, read_zst_records
+from .signals import AuthorIsOPDetector, Detector, RegexDetector, ScoreDetector, SignalDetector
+from .storage import (
+    COMMENT_FIELDS,
+    COMMENT_SCHEMA,
+    DATASET_VERSION,
+    SUBMISSION_FIELDS,
+    SUBMISSION_SCHEMA,
+    TRACKING_VERSION,
+    CorpusLayout,
+    TrackingLayout,
+)
+from .tracking import (
+    KeywordSet,
+    KeywordTracker,
+    TrackingResult,
+    TrackingStats,
+    load_keyword_sets,
+    merge_keyword_sets,
+)
+from .trees import TreeBuilder, load_threads
+from .utils import ArchiveFile, discover_archives, setup_logging
 
 __all__ = [
-    # Version
-    '__version__',
-    
-    # Models
-    'Submission',
-    'Comment', 
-    'Thread',
-    'CommentNode',
-    
-    # Main classes
-    'SubredditExtractor',
-    'TreeBuilder',
-    'SubredditData',
-    'SignalDetector',
-
-    # Signal detectors (built-in)
-    'Detector',
-    'RegexDetector',
-    'ScoreDetector',
-    'AuthorIsOPDetector',
-
-    # Signal detector presets
-    'get_detectors',
-    'StickiedCommentDetector',
-    'ModDistinguishedDetector',
-    'ContentRemovedDetector',
-    'AuthorDeletedDetector',
-    'TopLevelCommentDetector',
-    'DepthDetector',
-    'DeltaAwardedDetector',
-    'AITAVerdictDetector',
-    
-    # Result types
-    'ExtractionResult',
-    'ExtractionStats',
-    'SubredditMetadata',
-    
-    # Higher-level analysis classes
-    'ArchiveCatalogue',
-    'SubredditIndex',
-    'CrossSubIndex',
-
-    # Word/pattern search
-    'WordSearcher',
-    'SearchResult',
-    'SearchStats',
-    'assemble_search_results',
-
-    # Functions
-    'load_subreddit',
-    'load_threads',
-    'read_zst_records',
-    'read_zst_lines',
-    'setup_logging',
-    'discover_archives',
-    
-    # Low-level classes
-    'ZstReader',
-    'ReadProgress',
-    'CsvWriter',
-    'JsonlWriter',
-    'StreamingThreadWriter',
-    'ArchiveFile',
-    
-    # Constants
-    'SUBMISSION_CSV_FIELDS',
-    'COMMENT_CSV_FIELDS',
+    "__version__",
+    "ArchiveFile",
+    "ArchiveCatalogue",
+    "AITAVerdictDetector",
+    "AuthorDeletedDetector",
+    "AuthorIsOPDetector",
+    "build_smoke_report",
+    "Comment",
+    "CommentNode",
+    "ContentRemovedDetector",
+    "CorpusDataset",
+    "CorpusLayout",
+    "CorpusMetadata",
+    "CrossSubIndex",
+    "DATASET_VERSION",
+    "DeltaAwardedDetector",
+    "DepthDetector",
+    "Detector",
+    "ExtractionResult",
+    "ExtractionStats",
+    "KeywordSet",
+    "KeywordTracker",
+    "ModDistinguishedDetector",
+    "ReadProgress",
+    "RegexDetector",
+    "ScoreDetector",
+    "SignalDetector",
+    "Submission",
+    "StickiedCommentDetector",
+    "SubredditData",
+    "SubredditIndex",
+    "SubredditExtractor",
+    "SubredditMetadata",
+    "Thread",
+    "TopLevelCommentDetector",
+    "TrackingLayout",
+    "TRACKING_VERSION",
+    "TrackingResult",
+    "TrackingStats",
+    "TreeBuilder",
+    "ZstReader",
+    "COMMENT_FIELDS",
+    "COMMENT_SCHEMA",
+    "SUBMISSION_FIELDS",
+    "SUBMISSION_SCHEMA",
+    "count_records",
+    "discover_archives",
+    "load_keyword_sets",
+    "get_detectors",
+    "load_corpus",
+    "load_subreddit",
+    "load_threads",
+    "merge_keyword_sets",
+    "read_zst_lines",
+    "read_zst_records",
+    "setup_logging",
 ]

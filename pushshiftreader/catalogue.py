@@ -1,318 +1,77 @@
 """
-Archive catalogue builder — streaming pass over all archives to produce
-per-(subreddit, month) stats.
-
-Performs a single pass over each monthly archive pair, accumulating
-comment/submission counts and unique author sets per subreddit, then writes
-one CSV row per subreddit per month.  Author sets are discarded after each
-month so peak memory stays flat.
-
-Also provides SubredditIndex, which aggregates across all months to produce
-a single CSV with one row per subreddit, including NSFW flag and subscriber
-counts sourced from submission metadata.
+Canonical archive-wide catalogue and subreddit index builders.
 """
 
-import csv
-import time
 import logging
+import time
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
-from .utils import (
-    discover_archives,
-    iter_archive_pairs,
-    get_months_in_range,
-    ensure_directory,
-    format_duration,
+from .reader import ReadProgress, read_zst_records
+from .storage import (
+    CATALOGUE_MONTH_SCHEMA,
+    CATALOGUE_VERSION,
+    SUBREDDIT_INDEX_SCHEMA,
+    CatalogueLayout,
+    read_json,
+    read_parquet_records,
+    write_json,
+    write_parquet_records,
 )
-from .reader import read_zst_records
+from .utils import discover_archives, format_duration, format_size, get_months_in_range, iter_archive_pairs, timestamp_str
 
 logger = logging.getLogger(__name__)
 
-CATALOGUE_FIELDS = ['subreddit', 'month', 'n_submissions', 'n_comments', 'n_unique_authors']
+
+CATALOGUE_MONTH_SPECS = [(field.name, field.type) for field in CATALOGUE_MONTH_SCHEMA]
+SUBREDDIT_INDEX_SPECS = [(field.name, field.type) for field in SUBREDDIT_INDEX_SCHEMA]
+
+
+class _CatalogueProgressReporter:
+    """Periodic progress logs for raw archive scans."""
+
+    def __init__(self, label: str, enabled: bool = True):
+        self.label = label
+        self.enabled = enabled
+        self._last_percent = -1.0
+        self._last_log_time = 0.0
+
+    def callback(self, progress: ReadProgress) -> None:
+        if not self.enabled:
+            return
+
+        now = time.time()
+        percent = round(progress.percent, 1)
+        should_log = (
+            self._last_percent < 0
+            or percent >= self._last_percent + 5.0
+            or now - self._last_log_time >= 15.0
+            or progress.bytes_read >= progress.total_bytes
+        )
+        if not should_log:
+            return
+
+        logger.info(
+            "  %s: %5.1f%% scanned, %s lines",
+            self.label,
+            percent,
+            f"{progress.lines_read:,}",
+        )
+        self._last_percent = percent
+        self._last_log_time = now
 
 
 class ArchiveCatalogue:
     """
-    Build a per-(subreddit, month) statistics catalogue from raw Pushshift archives.
+    Build a canonical per-(subreddit, month) summary dataset from raw archives.
 
-    Performs a single streaming pass over each monthly archive pair,
-    accumulating counts per subreddit, then writes one CSV row per subreddit
-    per month.  Author sets are discarded after each month, keeping memory flat.
+    Output layout:
 
-    Supports resumable processing: on startup the existing output CSV is read to
-    find already-processed months, which are then skipped.
-
-    Example::
-
-        cat = ArchiveCatalogue(
-            archive_path="/path/to/dumps",
-            output_path="catalogue.csv",
-        )
-        cat.run(start_month="2013-01", end_month="2013-06")
-    """
-
-    def __init__(
-        self,
-        archive_path,
-        output_path,
-        show_progress: bool = True,
-    ):
-        self.archive_path = Path(archive_path)
-        self.output_path = Path(output_path)
-        self.show_progress = show_progress
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
-    def run(
-        self,
-        start_month: Optional[str] = None,
-        end_month: Optional[str] = None,
-        min_activity: int = 1,
-    ) -> dict:
-        """
-        Run the catalogue pass over all monthly archives.
-
-        Args:
-            start_month: Optional start month (YYYY-MM), inclusive.
-            end_month:   Optional end month (YYYY-MM), inclusive.
-            min_activity: Skip subreddits whose total records
-                          (submissions + comments) in a month is below this
-                          threshold.  Default 1 (keep all).
-
-        Returns:
-            Summary dict with keys ``months_processed``, ``subreddits_seen``,
-            and ``rows_written``.
-        """
-        start_time = time.time()
-
-        archives = discover_archives(self.archive_path)
-        if not archives:
-            logger.warning(f"No archives found in {self.archive_path}")
-            return {'months_processed': 0, 'subreddits_seen': 0, 'rows_written': 0}
-
-        months = get_months_in_range(archives, start_month, end_month)
-        completed = self._completed_months()
-
-        pending = [m for m in months if m not in completed]
-        skipped = len(months) - len(pending)
-
-        if skipped:
-            logger.info(f"Skipping {skipped} already-catalogued month(s)")
-
-        if not pending:
-            logger.info("All months already catalogued — nothing to do")
-            return {'months_processed': 0, 'subreddits_seen': 0, 'rows_written': 0}
-
-        logger.info(f"Cataloguing {len(pending)} month(s) → {self.output_path}")
-
-        # Ensure the output directory exists
-        ensure_directory(self.output_path.parent)
-
-        # Open CSV in append mode; write header only when starting fresh
-        file_is_new = not self.output_path.exists() or self.output_path.stat().st_size == 0
-        fh = open(self.output_path, 'a', newline='', encoding='utf-8')
-        writer = csv.DictWriter(fh, fieldnames=CATALOGUE_FIELDS)
-        if file_is_new:
-            writer.writeheader()
-
-        months_processed = 0
-        total_rows = 0
-        all_subreddits: Set[str] = set()
-
-        try:
-            for month, comments_file, submissions_file in iter_archive_pairs(archives):
-                if month not in pending:
-                    continue
-
-                if self.show_progress:
-                    print(f"  [{month}] processing ...", flush=True)
-
-                month_data = self._process_month(month, comments_file, submissions_file)
-
-                # Write one row per subreddit, applying min_activity filter
-                rows_this_month = 0
-                for subreddit, stats in sorted(month_data.items()):
-                    if stats['n_submissions'] + stats['n_comments'] < min_activity:
-                        continue
-                    writer.writerow({
-                        'subreddit': subreddit,
-                        'month': month,
-                        'n_submissions': stats['n_submissions'],
-                        'n_comments': stats['n_comments'],
-                        'n_unique_authors': len(stats['authors']),
-                    })
-                    rows_this_month += 1
-                    all_subreddits.add(subreddit)
-
-                fh.flush()
-                months_processed += 1
-                total_rows += rows_this_month
-
-                if self.show_progress:
-                    print(
-                        f"  [{month}] done — {rows_this_month:,} subreddits written",
-                        flush=True,
-                    )
-        finally:
-            fh.close()
-
-        duration = time.time() - start_time
-        logger.info(
-            f"Catalogue complete: {months_processed} months, "
-            f"{len(all_subreddits):,} subreddits, "
-            f"{total_rows:,} rows in {format_duration(duration)}"
-        )
-
-        return {
-            'months_processed': months_processed,
-            'subreddits_seen': len(all_subreddits),
-            'rows_written': total_rows,
-        }
-
-    # ------------------------------------------------------------------
-    # Private helpers
-    # ------------------------------------------------------------------
-
-    def _completed_months(self) -> Set[str]:
-        """
-        Read the existing output CSV (if any) and return the set of
-        already-processed months so they can be skipped on resume.
-        """
-        if not self.output_path.exists():
-            return set()
-
-        done: Set[str] = set()
-        try:
-            with open(self.output_path, newline='', encoding='utf-8') as fh:
-                reader = csv.DictReader(fh)
-                for row in reader:
-                    if 'month' in row and row['month']:
-                        done.add(row['month'])
-        except Exception as exc:
-            logger.warning(f"Could not read existing catalogue ({self.output_path}): {exc}")
-
-        return done
-
-    def _process_month(
-        self,
-        month: str,
-        comments_file,
-        submissions_file,
-    ) -> Dict[str, dict]:
-        """
-        Stream one month's archives and return per-subreddit stats.
-
-        Returns:
-            Dict mapping ``subreddit_name`` → ``{'n_submissions': int,
-            'n_comments': int, 'authors': set}``.
-        """
-        data: Dict[str, dict] = {}
-
-        def _bucket(name: str) -> dict:
-            if name not in data:
-                data[name] = {'n_submissions': 0, 'n_comments': 0, 'authors': set()}
-            return data[name]
-
-        def _progress(prog):
-            if self.show_progress:
-                print(
-                    f"\r    {prog.percent:5.1f}%  {prog.lines_read:>12,} lines",
-                    end='',
-                    flush=True,
-                )
-
-        # Stream submissions
-        if submissions_file is not None:
-            logger.debug(f"  Streaming submissions: {submissions_file.path.name}")
-            if self.show_progress:
-                print(f"    submissions: {submissions_file.path.name}", flush=True)
-            for record in read_zst_records(submissions_file.path, progress_callback=_progress):
-                sub = record.get('subreddit', '')
-                if not sub:
-                    continue
-                bucket = _bucket(sub)
-                bucket['n_submissions'] += 1
-                author = record.get('author', '')
-                if author and author != '[deleted]':
-                    bucket['authors'].add(author)
-            if self.show_progress:
-                print()
-
-        # Stream comments
-        if comments_file is not None:
-            logger.debug(f"  Streaming comments: {comments_file.path.name}")
-            if self.show_progress:
-                print(f"    comments: {comments_file.path.name}", flush=True)
-            for record in read_zst_records(comments_file.path, progress_callback=_progress):
-                sub = record.get('subreddit', '')
-                if not sub:
-                    continue
-                bucket = _bucket(sub)
-                bucket['n_comments'] += 1
-                author = record.get('author', '')
-                if author and author != '[deleted]':
-                    bucket['authors'].add(author)
-            if self.show_progress:
-                print()
-
-        return data
-
-
-# ---------------------------------------------------------------------------
-# SubredditIndex
-# ---------------------------------------------------------------------------
-
-# Fields written to the per-month intermediate CSVs
-_INDEX_MONTH_FIELDS = [
-    'subreddit', 'subreddit_id',
-    'n_submissions', 'n_comments',
-    'over_18', 'subreddit_subscribers',
-]
-
-# Fields in the final aggregated CSV
-INDEX_FIELDS = [
-    'subreddit', 'subreddit_id',
-    'n_submissions', 'n_comments',
-    'first_month', 'last_month', 'months_active',
-    'over_18', 'subreddit_subscribers',
-]
-
-
-class SubredditIndex:
-    """
-    Build a per-subreddit aggregated index from raw Pushshift archives.
-
-    Performs a single streaming pass over all monthly archive pairs and
-    produces a CSV with **one row per subreddit** containing totals and
-    metadata aggregated across all time.
-
-    Runs are resumable: per-month intermediate files are written to a
-    ``<stem>_months/`` sibling directory.  On restart, already-processed
-    months are skipped automatically.  Call :meth:`run` to process archives
-    and write the final CSV in one step.
-
-    Output columns:
-
-    ``subreddit``, ``subreddit_id``, ``n_submissions``, ``n_comments``,
-    ``first_month``, ``last_month``, ``months_active``,
-    ``over_18``, ``subreddit_subscribers``
-
-    - ``over_18`` — ``True`` if any submission ever carried the NSFW flag.
-    - ``subreddit_subscribers`` — highest subscriber count observed across all
-      records (sourced from submission metadata).
-
-    Example::
-
-        idx = SubredditIndex(
-            archive_path="/path/to/dumps",
-            output_path="./subreddits.csv",
-        )
-        result = idx.run(start_month="2020-01", end_month="2022-12")
-        print(f"Found {result['subreddits']:,} subreddits")
-        # → subreddits.csv  (one row per subreddit)
+    - ``months/YYYY-MM.parquet``: one row per subreddit for the month
+    - ``months/YYYY-MM.json``: completion marker + month metadata
+    - ``catalogue.parquet``: all month rows combined
+    - ``subreddit_index.parquet``: one row per subreddit aggregated across months
+    - ``catalogue.json``: top-level run metadata
     """
 
     def __init__(
@@ -320,280 +79,320 @@ class SubredditIndex:
         archive_path: Path,
         output_path: Path,
         show_progress: bool = True,
+        progress_interval: int = 250000,
     ):
-        """
-        Initialise the index builder.
-
-        Args:
-            archive_path: Root directory containing ``comments/`` and
-                ``submissions/`` subdirectories of ``.zst`` archives.
-            output_path: Destination CSV file (e.g. ``./subreddits.csv``).
-                Intermediate per-month files are stored alongside it in a
-                ``<stem>_months/`` directory.
-            show_progress: Print progress to stdout while processing.
-        """
         self.archive_path = Path(archive_path)
         self.output_path = Path(output_path)
+        self.layout = CatalogueLayout(self.output_path)
         self.show_progress = show_progress
+        self.progress_interval = max(1, progress_interval)
 
-        # Intermediate per-month files live next to the output CSV
-        stem = self.output_path.stem
-        self._months_dir = self.output_path.parent / f"{stem}_months"
+    def _completed_months(self) -> Set[str]:
+        return {path.stem for path in self.layout.month_metadata_files()}
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+    def _bucket(self, data: Dict[str, dict], subreddit: str) -> dict:
+        if subreddit not in data:
+            data[subreddit] = {
+                "subreddit": subreddit,
+                "subreddit_id": "",
+                "n_submissions": 0,
+                "n_comments": 0,
+                "authors": set(),
+                "over_18": False,
+                "subreddit_subscribers": 0,
+            }
+        return data[subreddit]
+
+    def _scan_archive(self, archive, data: Dict[str, dict]) -> None:
+        reporter = _CatalogueProgressReporter(archive.path.name, enabled=self.show_progress)
+        logger.info("Processing %s (%s)", archive.path.name, format_size(archive.path.stat().st_size))
+
+        for record in read_zst_records(
+            archive.path,
+            progress_callback=reporter.callback if self.show_progress else None,
+            progress_interval=self.progress_interval,
+        ):
+            subreddit = (record.get("subreddit") or "").strip()
+            if not subreddit:
+                continue
+
+            bucket = self._bucket(data, subreddit)
+            if archive.file_type == "submissions":
+                bucket["n_submissions"] += 1
+                if not bucket["subreddit_id"]:
+                    bucket["subreddit_id"] = record.get("subreddit_id") or ""
+                if record.get("over_18"):
+                    bucket["over_18"] = True
+                try:
+                    subscribers = int(record.get("subreddit_subscribers") or 0)
+                except (TypeError, ValueError):
+                    subscribers = 0
+                if subscribers > bucket["subreddit_subscribers"]:
+                    bucket["subreddit_subscribers"] = subscribers
+            else:
+                bucket["n_comments"] += 1
+                if not bucket["subreddit_id"]:
+                    bucket["subreddit_id"] = record.get("subreddit_id") or ""
+
+            author = record.get("author") or ""
+            if author and author != "[deleted]":
+                bucket["authors"].add(author)
+
+    def _process_month(self, month: str, comments_file, submissions_file, min_activity: int) -> List[dict]:
+        data: Dict[str, dict] = {}
+
+        if submissions_file is not None:
+            self._scan_archive(submissions_file, data)
+        if comments_file is not None:
+            self._scan_archive(comments_file, data)
+
+        rows: List[dict] = []
+        for subreddit, bucket in sorted(data.items()):
+            total_records = bucket["n_submissions"] + bucket["n_comments"]
+            if total_records < min_activity:
+                continue
+            rows.append(
+                {
+                    "subreddit": subreddit,
+                    "month": month,
+                    "subreddit_id": bucket["subreddit_id"],
+                    "n_submissions": bucket["n_submissions"],
+                    "n_comments": bucket["n_comments"],
+                    "n_unique_authors": len(bucket["authors"]),
+                    "total_records": total_records,
+                    "over_18": bucket["over_18"],
+                    "subreddit_subscribers": bucket["subreddit_subscribers"],
+                }
+            )
+        return rows
+
+    def _combine_catalogue(self) -> List[dict]:
+        rows: List[dict] = []
+        for month_path in sorted((self.output_path / "months").glob("*.parquet")):
+            rows.extend(read_parquet_records(month_path))
+
+        write_parquet_records(
+            self.layout.combined_catalogue_path,
+            rows,
+            CATALOGUE_MONTH_SCHEMA,
+            CATALOGUE_MONTH_SPECS,
+        )
+        return rows
+
+    def _write_index_from_rows(self, rows: List[dict], min_records: int = 1) -> int:
+        aggregated: Dict[str, dict] = {}
+
+        for row in rows:
+            subreddit = row["subreddit"]
+            entry = aggregated.get(subreddit)
+            if entry is None:
+                entry = {
+                    "subreddit": subreddit,
+                    "subreddit_id": row.get("subreddit_id") or "",
+                    "n_submissions": 0,
+                    "n_comments": 0,
+                    "total_records": 0,
+                    "months": [],
+                    "over_18": False,
+                    "subreddit_subscribers": 0,
+                }
+                aggregated[subreddit] = entry
+
+            entry["n_submissions"] += int(row.get("n_submissions") or 0)
+            entry["n_comments"] += int(row.get("n_comments") or 0)
+            entry["total_records"] += int(row.get("total_records") or 0)
+            entry["months"].append(row["month"])
+            if not entry["subreddit_id"] and row.get("subreddit_id"):
+                entry["subreddit_id"] = row["subreddit_id"]
+            if row.get("over_18"):
+                entry["over_18"] = True
+            subscribers = int(row.get("subreddit_subscribers") or 0)
+            if subscribers > entry["subreddit_subscribers"]:
+                entry["subreddit_subscribers"] = subscribers
+
+        index_rows: List[dict] = []
+        for subreddit, entry in sorted(aggregated.items()):
+            if entry["total_records"] < min_records:
+                continue
+            months = sorted(set(entry["months"]))
+            index_rows.append(
+                {
+                    "subreddit": subreddit,
+                    "subreddit_id": entry["subreddit_id"],
+                    "n_submissions": entry["n_submissions"],
+                    "n_comments": entry["n_comments"],
+                    "total_records": entry["total_records"],
+                    "first_month": months[0] if months else "",
+                    "last_month": months[-1] if months else "",
+                    "months_active": len(months),
+                    "over_18": entry["over_18"],
+                    "subreddit_subscribers": entry["subreddit_subscribers"],
+                }
+            )
+
+        write_parquet_records(
+            self.layout.subreddit_index_path,
+            index_rows,
+            SUBREDDIT_INDEX_SCHEMA,
+            SUBREDDIT_INDEX_SPECS,
+        )
+        return len(index_rows)
 
     def run(
         self,
         start_month: Optional[str] = None,
         end_month: Optional[str] = None,
-        min_records: int = 1,
+        min_activity: int = 1,
     ) -> dict:
-        """
-        Stream archives, build per-subreddit stats, write the output CSV.
-
-        Already-processed months (those with an intermediate file in the
-        ``_months/`` directory) are skipped automatically, making runs
-        resumable.
-
-        Args:
-            start_month: Optional inclusive start month (``YYYY-MM``).
-            end_month:   Optional inclusive end month (``YYYY-MM``).
-            min_records: Subreddits with fewer total records
-                (submissions + comments across all time) than this threshold
-                are excluded from the output.  Default ``1`` (keep all).
-
-        Returns:
-            Dict with keys ``months_processed``, ``subreddits``,
-            and ``output_path``.
-        """
-        start_time = time.time()
-
+        started = time.time()
         archives = discover_archives(self.archive_path)
         if not archives:
-            logger.warning(f"No archives found in {self.archive_path}")
-            return {'months_processed': 0, 'subreddits': 0, 'output_path': str(self.output_path)}
+            logger.warning("No archives found in %s", self.archive_path)
+            return {"months_processed": 0, "subreddits_seen": 0, "rows_written": 0, "output_path": str(self.output_path)}
 
         months = get_months_in_range(archives, start_month, end_month)
-        ensure_directory(self._months_dir)
-
-        completed = self._completed_months()
-        pending = [m for m in months if m not in completed]
-        skipped = len(months) - len(pending)
-
-        if skipped:
-            logger.info(f"Skipping {skipped} already-indexed month(s)")
+        pending = [month for month in months if month not in self._completed_months()]
         if not pending:
-            logger.info("All months already indexed — aggregating existing data")
+            logger.info("All months already catalogued; rebuilding combined outputs")
         else:
-            logger.info(f"Indexing {len(pending)} month(s)")
+            logger.info("Cataloguing %s month(s) into %s", len(pending), self.output_path)
 
-        # --- Streaming pass: write one intermediate CSV per month ----------
+        months_processed = 0
+        rows_written = 0
+        subreddits_seen: Set[str] = set()
+
         for month, comments_file, submissions_file in iter_archive_pairs(archives):
             if month not in pending:
                 continue
 
-            if self.show_progress:
-                print(f"  [{month}] processing ...", flush=True)
+            logger.info("=== Cataloguing %s ===", month)
+            month_started = time.time()
+            rows = self._process_month(month, comments_file, submissions_file, min_activity=min_activity)
+            write_parquet_records(
+                self.layout.month_data_path(month),
+                rows,
+                CATALOGUE_MONTH_SCHEMA,
+                CATALOGUE_MONTH_SPECS,
+            )
+            write_json(
+                self.layout.month_metadata_path(month),
+                {
+                    "month": month,
+                    "catalogue_version": CATALOGUE_VERSION,
+                    "rows_written": len(rows),
+                    "subreddits_seen": len({row["subreddit"] for row in rows}),
+                    "duration_seconds": round(time.time() - month_started, 3),
+                    "completed_at": timestamp_str(),
+                },
+            )
+            months_processed += 1
+            rows_written += len(rows)
+            subreddits_seen.update(row["subreddit"] for row in rows)
+            logger.info("  %s rows written for %s (%s)", f"{len(rows):,}", month, format_duration(time.time() - month_started))
 
-            month_data = self._process_month(month, comments_file, submissions_file)
-            self._write_month_intermediate(month, month_data)
+        combined_rows = self._combine_catalogue()
+        index_count = self._write_index_from_rows(combined_rows)
+        duration = time.time() - started
 
-            if self.show_progress:
-                print(f"  [{month}] done — {len(month_data):,} subreddits", flush=True)
-
-        # --- Aggregation pass: merge all intermediates → final CSV ---------
-        subreddit_count = self._aggregate(min_records)
-
-        duration = time.time() - start_time
-        logger.info(
-            f"SubredditIndex complete: {len(pending)} months processed, "
-            f"{subreddit_count:,} subreddits → {self.output_path} "
-            f"({format_duration(duration)})"
+        write_json(
+            self.layout.metadata_path,
+            {
+                "catalogue_version": CATALOGUE_VERSION,
+                "months_processed": months_processed,
+                "rows_written": len(combined_rows),
+                "subreddits_seen": len({row["subreddit"] for row in combined_rows}),
+                "subreddit_index_rows": index_count,
+                "archive_path": str(self.archive_path),
+                "completed_at": timestamp_str(),
+                "duration_seconds": round(duration, 3),
+            },
         )
 
+        logger.info(
+            "Catalogue complete: %s months, %s rows, %s indexed subreddits in %s",
+            months_processed,
+            f"{len(combined_rows):,}",
+            f"{index_count:,}",
+            format_duration(duration),
+        )
         return {
-            'months_processed': len(pending),
-            'subreddits': subreddit_count,
-            'output_path': str(self.output_path),
+            "months_processed": months_processed,
+            "subreddits_seen": len({row["subreddit"] for row in combined_rows}),
+            "rows_written": len(combined_rows),
+            "output_path": str(self.output_path),
         }
 
-    # ------------------------------------------------------------------
-    # Private helpers
-    # ------------------------------------------------------------------
 
-    def _completed_months(self) -> Set[str]:
-        """Return set of months that already have an intermediate file."""
-        done: Set[str] = set()
-        if self._months_dir.exists():
-            for p in self._months_dir.glob("*.csv"):
-                # Filename is YYYY-MM.csv
-                done.add(p.stem)
-        return done
+class SubredditIndex:
+    """
+    Rebuild a per-subreddit aggregate index from an existing catalogue root.
+    """
 
-    def _process_month(
-        self,
-        month: str,
-        comments_file,
-        submissions_file,
-    ) -> Dict[str, dict]:
-        """
-        Stream one month's archives and accumulate per-subreddit stats.
+    def __init__(self, catalogue_path: Path):
+        self.catalogue_path = Path(catalogue_path)
+        self.layout = CatalogueLayout(self.catalogue_path)
 
-        Returns a dict mapping subreddit name → stats dict with keys:
-        ``subreddit_id``, ``n_submissions``, ``n_comments``,
-        ``over_18``, ``subreddit_subscribers``.
-        """
-        data: Dict[str, dict] = {}
+    def build(self, min_records: int = 1) -> dict:
+        rows = read_parquet_records(self.layout.combined_catalogue_path)
+        if not rows:
+            rows = []
+            for month_file in sorted((self.catalogue_path / "months").glob("*.parquet")):
+                rows.extend(read_parquet_records(month_file))
 
-        def _bucket(name: str) -> dict:
-            if name not in data:
-                data[name] = {
-                    'subreddit_id': '',
-                    'n_submissions': 0,
-                    'n_comments': 0,
-                    'over_18': False,
-                    'subreddit_subscribers': 0,
+        aggregated: Dict[str, dict] = {}
+        for row in rows:
+            subreddit = row["subreddit"]
+            entry = aggregated.get(subreddit)
+            if entry is None:
+                entry = {
+                    "subreddit": subreddit,
+                    "subreddit_id": row.get("subreddit_id") or "",
+                    "n_submissions": 0,
+                    "n_comments": 0,
+                    "total_records": 0,
+                    "months": [],
+                    "over_18": False,
+                    "subreddit_subscribers": 0,
                 }
-            return data[name]
+                aggregated[subreddit] = entry
 
-        def _progress(prog):
-            if self.show_progress:
-                print(
-                    f"\r    {prog.percent:5.1f}%  {prog.lines_read:>12,} lines",
-                    end='', flush=True,
-                )
+            entry["n_submissions"] += int(row.get("n_submissions") or 0)
+            entry["n_comments"] += int(row.get("n_comments") or 0)
+            entry["total_records"] += int(row.get("total_records") or 0)
+            entry["months"].append(row["month"])
+            if row.get("over_18"):
+                entry["over_18"] = True
+            subscribers = int(row.get("subreddit_subscribers") or 0)
+            if subscribers > entry["subreddit_subscribers"]:
+                entry["subreddit_subscribers"] = subscribers
 
-        if submissions_file is not None:
-            if self.show_progress:
-                print(f"    submissions: {submissions_file.path.name}", flush=True)
-            for record in read_zst_records(submissions_file.path, progress_callback=_progress):
-                sub = record.get('subreddit', '')
-                if not sub:
-                    continue
-                bucket = _bucket(sub)
-                bucket['n_submissions'] += 1
+        index_rows = []
+        for subreddit, entry in sorted(aggregated.items()):
+            if entry["total_records"] < min_records:
+                continue
+            months = sorted(set(entry["months"]))
+            index_rows.append(
+                {
+                    "subreddit": subreddit,
+                    "subreddit_id": entry["subreddit_id"],
+                    "n_submissions": entry["n_submissions"],
+                    "n_comments": entry["n_comments"],
+                    "total_records": entry["total_records"],
+                    "first_month": months[0] if months else "",
+                    "last_month": months[-1] if months else "",
+                    "months_active": len(months),
+                    "over_18": entry["over_18"],
+                    "subreddit_subscribers": entry["subreddit_subscribers"],
+                }
+            )
 
-                # Capture subreddit-level metadata from submission records
-                if not bucket['subreddit_id']:
-                    bucket['subreddit_id'] = record.get('subreddit_id', '')
-                if record.get('over_18'):
-                    bucket['over_18'] = True
-                subs = record.get('subreddit_subscribers') or 0
-                try:
-                    subs = int(subs)
-                except (TypeError, ValueError):
-                    subs = 0
-                if subs > bucket['subreddit_subscribers']:
-                    bucket['subreddit_subscribers'] = subs
-
-            if self.show_progress:
-                print()
-
-        if comments_file is not None:
-            if self.show_progress:
-                print(f"    comments: {comments_file.path.name}", flush=True)
-            for record in read_zst_records(comments_file.path, progress_callback=_progress):
-                sub = record.get('subreddit', '')
-                if not sub:
-                    continue
-                bucket = _bucket(sub)
-                bucket['n_comments'] += 1
-
-                if not bucket['subreddit_id']:
-                    bucket['subreddit_id'] = record.get('subreddit_id', '')
-
-            if self.show_progress:
-                print()
-
-        return data
-
-    def _write_month_intermediate(self, month: str, data: Dict[str, dict]) -> None:
-        """Write per-subreddit stats for one month to an intermediate CSV."""
-        out_path = self._months_dir / f"{month}.csv"
-        with open(out_path, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.DictWriter(f, fieldnames=_INDEX_MONTH_FIELDS)
-            writer.writeheader()
-            for subreddit in sorted(data):
-                s = data[subreddit]
-                writer.writerow({
-                    'subreddit': subreddit,
-                    'subreddit_id': s['subreddit_id'],
-                    'n_submissions': s['n_submissions'],
-                    'n_comments': s['n_comments'],
-                    'over_18': s['over_18'],
-                    'subreddit_subscribers': s['subreddit_subscribers'],
-                })
-
-    def _aggregate(self, min_records: int) -> int:
-        """
-        Read all intermediate monthly CSVs and aggregate into the final
-        per-subreddit output CSV.
-
-        Returns the number of subreddits written.
-        """
-        # Accumulate across all intermediate files
-        agg: Dict[str, dict] = {}
-
-        month_files = sorted(self._months_dir.glob("*.csv"))
-        if not month_files:
-            logger.warning("No intermediate month files found; output will be empty.")
-
-        for month_path in month_files:
-            month = month_path.stem  # YYYY-MM
-            with open(month_path, newline='', encoding='utf-8') as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    sub = row['subreddit']
-                    if sub not in agg:
-                        agg[sub] = {
-                            'subreddit_id': row.get('subreddit_id', ''),
-                            'n_submissions': 0,
-                            'n_comments': 0,
-                            'months': [],
-                            'over_18': False,
-                            'subreddit_subscribers': 0,
-                        }
-                    entry = agg[sub]
-
-                    entry['n_submissions'] += int(row.get('n_submissions') or 0)
-                    entry['n_comments'] += int(row.get('n_comments') or 0)
-                    entry['months'].append(month)
-
-                    if not entry['subreddit_id'] and row.get('subreddit_id'):
-                        entry['subreddit_id'] = row['subreddit_id']
-
-                    if row.get('over_18') in ('True', 'true', '1', True):
-                        entry['over_18'] = True
-
-                    subs = int(row.get('subreddit_subscribers') or 0)
-                    if subs > entry['subreddit_subscribers']:
-                        entry['subreddit_subscribers'] = subs
-
-        # Write final CSV
-        ensure_directory(self.output_path.parent)
-        written = 0
-        with open(self.output_path, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.DictWriter(f, fieldnames=INDEX_FIELDS)
-            writer.writeheader()
-            for subreddit in sorted(agg):
-                entry = agg[subreddit]
-                total = entry['n_submissions'] + entry['n_comments']
-                if total < min_records:
-                    continue
-                months_sorted = sorted(entry['months'])
-                writer.writerow({
-                    'subreddit': subreddit,
-                    'subreddit_id': entry['subreddit_id'],
-                    'n_submissions': entry['n_submissions'],
-                    'n_comments': entry['n_comments'],
-                    'first_month': months_sorted[0] if months_sorted else '',
-                    'last_month': months_sorted[-1] if months_sorted else '',
-                    'months_active': len(months_sorted),
-                    'over_18': entry['over_18'],
-                    'subreddit_subscribers': entry['subreddit_subscribers'],
-                })
-                written += 1
-
-        return written
+        write_parquet_records(
+            self.layout.subreddit_index_path,
+            index_rows,
+            SUBREDDIT_INDEX_SCHEMA,
+            SUBREDDIT_INDEX_SPECS,
+        )
+        return {
+            "subreddits": len(index_rows),
+            "output_path": str(self.layout.subreddit_index_path),
+        }

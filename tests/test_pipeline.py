@@ -1,0 +1,528 @@
+import json
+from pathlib import Path
+
+import zstandard
+
+from pushshiftreader import (
+    ArchiveCatalogue,
+    AuthorIsOPDetector,
+    CrossSubIndex,
+    KeywordSet,
+    KeywordTracker,
+    RegexDetector,
+    SignalDetector,
+    SubredditIndex,
+    SubredditExtractor,
+    TreeBuilder,
+    build_smoke_report,
+    load_corpus,
+)
+from pushshiftreader.cli import main as cli_main
+from pushshiftreader.storage import TrackingLayout, read_json, read_parquet_records
+
+
+def _write_zst_jsonl(path: Path, records):
+    compressor = zstandard.ZstdCompressor()
+    payload = "\n".join(json.dumps(record) for record in records).encode("utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "wb") as handle:
+        handle.write(compressor.compress(payload))
+
+
+def _archive_fixture(root: Path) -> Path:
+    archive_root = root / "archives"
+
+    _write_zst_jsonl(
+        archive_root / "submissions" / "RS_2020-01.zst",
+        [
+            {
+                "id": "s1",
+                "subreddit": "science",
+                "subreddit_id": "t5_science",
+                "author": "alice",
+                "title": "Climate policy and science",
+                "selftext": "Climate change and warming are central topics.",
+                "created_utc": 1577836800,
+                "score": 10,
+                "num_comments": 2,
+                "permalink": "/r/science/comments/s1/",
+            },
+            {
+                "id": "s_noise",
+                "subreddit": "AskReddit",
+                "subreddit_id": "t5_askreddit",
+                "author": "alice",
+                "title": "Unrelated",
+                "selftext": "Ignore this",
+                "created_utc": 1577836801,
+                "score": 1,
+                "num_comments": 0,
+                "permalink": "/r/AskReddit/comments/s_noise/",
+            },
+        ],
+    )
+    _write_zst_jsonl(
+        archive_root / "comments" / "RC_2020-01.zst",
+        [
+            {
+                "id": "c1",
+                "subreddit": "science",
+                "subreddit_id": "t5_science",
+                "author": "bob",
+                "body": "Climate change is real.",
+                "created_utc": 1577836900,
+                "score": 4,
+                "link_id": "t3_s1",
+                "parent_id": "t3_s1",
+            },
+            {
+                "id": "c2",
+                "subreddit": "science",
+                "subreddit_id": "t5_science",
+                "author": "carol",
+                "body": "Yes, warming is accelerating.",
+                "created_utc": 1577837000,
+                "score": 3,
+                "link_id": "t3_s1",
+                "parent_id": "t1_c1",
+            },
+            {
+                "id": "c_noise",
+                "subreddit": "AskReddit",
+                "subreddit_id": "t5_askreddit",
+                "author": "alice",
+                "body": "Ignore this",
+                "created_utc": 1577837100,
+                "score": 1,
+                "link_id": "t3_s_noise",
+                "parent_id": "t3_s_noise",
+            },
+        ],
+    )
+
+    _write_zst_jsonl(
+        archive_root / "submissions" / "RS_2020-02.zst",
+        [
+            {
+                "id": "s2",
+                "subreddit": "science",
+                "subreddit_id": "t5_science",
+                "author": "dora",
+                "title": "Energy policy",
+                "selftext": "A carbon tax can change incentives.",
+                "created_utc": 1580515200,
+                "score": 9,
+                "num_comments": 2,
+                "permalink": "/r/science/comments/s2/",
+            }
+        ],
+    )
+    _write_zst_jsonl(
+        archive_root / "comments" / "RC_2020-02.zst",
+        [
+            {
+                "id": "c4",
+                "subreddit": "science",
+                "subreddit_id": "t5_science",
+                "author": "erin",
+                "body": "A carbon tax now.",
+                "created_utc": 1580515300,
+                "score": 5,
+                "link_id": "t3_s2",
+                "parent_id": "t3_s2",
+            },
+            {
+                "id": "c5",
+                "subreddit": "science",
+                "subreddit_id": "t5_science",
+                "author": "frank",
+                "body": "This climate policy needs discussion.",
+                "created_utc": 1580515400,
+                "score": 2,
+                "link_id": "t3_s2",
+                "parent_id": "t1_missing",
+            },
+        ],
+    )
+
+    return archive_root
+
+
+def test_extracts_canonical_corpus_and_resumes(tmp_path):
+    archive_root = _archive_fixture(tmp_path)
+    output_root = tmp_path / "extracted"
+
+    extractor = SubredditExtractor(
+        archive_path=archive_root,
+        output_path=output_root,
+        subreddits=["science"],
+    )
+    first = extractor.run()
+    second = extractor.run()
+
+    dataset_path = output_root / "science"
+    dataset = load_corpus(dataset_path)
+    metadata = read_json(dataset_path / "dataset.json")
+
+    assert first.months_processed == 2
+    assert first.total_submissions == 2
+    assert first.total_comments == 4
+    assert second.months_processed == 0
+    assert metadata["months"] == ["2020-01", "2020-02"]
+    assert dataset.submission_count() == 2
+    assert dataset.comment_count() == 4
+    assert dataset.metadata.total_submissions == 2
+    assert dataset.metadata.total_comments == 4
+
+
+def test_catalogue_builds_monthly_and_index_outputs(tmp_path):
+    archive_root = _archive_fixture(tmp_path)
+    catalogue_root = tmp_path / "catalogue"
+
+    catalogue = ArchiveCatalogue(
+        archive_path=archive_root,
+        output_path=catalogue_root,
+        show_progress=False,
+        progress_interval=1,
+    )
+    first = catalogue.run()
+    second = catalogue.run()
+
+    combined_rows = read_parquet_records(catalogue_root / "catalogue.parquet")
+    index_rows = read_parquet_records(catalogue_root / "subreddit_index.parquet")
+    metadata = read_json(catalogue_root / "catalogue.json")
+
+    assert first["months_processed"] == 2
+    assert second["months_processed"] == 0
+    assert metadata["rows_written"] == len(combined_rows)
+    assert any(
+        row["month"] == "2020-01"
+        and row["subreddit"] == "science"
+        and row["n_submissions"] == 1
+        and row["n_comments"] == 2
+        and row["n_unique_authors"] == 3
+        for row in combined_rows
+    )
+    assert any(
+        row["subreddit"] == "science"
+        and row["total_records"] == 6
+        and row["months_active"] == 2
+        for row in index_rows
+    )
+
+    rebuilt = SubredditIndex(catalogue_root).build()
+    assert rebuilt["subreddits"] == len(index_rows)
+
+
+def test_extract_logs_progress(tmp_path, caplog):
+    archive_root = _archive_fixture(tmp_path)
+    output_root = tmp_path / "extracted"
+
+    caplog.set_level("INFO")
+    extractor = SubredditExtractor(
+        archive_path=archive_root,
+        output_path=output_root,
+        subreddits=["science"],
+        progress_interval=1,
+        show_progress=True,
+    )
+    extractor.run(start_month="2020-01", end_month="2020-01")
+
+    assert any("scanned" in record.getMessage() for record in caplog.records)
+    completed_logs = [
+        record.getMessage()
+        for record in caplog.records
+        if "100.0% scanned" in record.getMessage()
+    ]
+    assert len(completed_logs) == 2
+
+
+def test_tracks_keyword_sets_and_writes_aggregates(tmp_path):
+    archive_root = _archive_fixture(tmp_path)
+    output_root = tmp_path / "extracted"
+    SubredditExtractor(
+        archive_path=archive_root,
+        output_path=output_root,
+        subreddits=["science"],
+    ).run()
+
+    dataset_path = output_root / "science"
+    tracking_root = tmp_path / "tracking"
+    tracker = KeywordTracker(
+        dataset_path=dataset_path,
+        output_path=tracking_root,
+        keyword_sets=[
+            KeywordSet(name="climate", terms=["climate", "warming"], regexes=[r"carbon\s+tax"]),
+            KeywordSet(name="policy", terms=["policy"]),
+        ],
+    )
+    result = tracker.run()
+
+    layout = TrackingLayout(tracking_root)
+    monthly_counts = read_parquet_records(layout.combined_monthly_counts_path)
+    term_counts = read_parquet_records(layout.combined_term_counts_path)
+    matched_comments = read_parquet_records(layout.comments_match_path("2020-02"))
+
+    assert result.months_processed == 2
+    assert result.total_comments == 5
+    assert result.total_submissions == 4
+    assert any(
+        row["month"] == "2020-01"
+        and row["keyword_set"] == "climate"
+        and row["record_type"] == "comment"
+        and row["matched_records"] == 2
+        for row in monthly_counts
+    )
+    assert any(
+        row["keyword_set"] == "policy"
+        and row["term"] == "policy"
+        and row["matched_records"] >= 1
+        for row in term_counts
+    )
+    assert any(row["keyword_set"] == "climate" for row in matched_comments)
+    assert any(row["keyword_set"] == "policy" for row in matched_comments)
+
+
+def test_builds_thread_tables_and_loader_uses_them(tmp_path):
+    archive_root = _archive_fixture(tmp_path)
+    output_root = tmp_path / "extracted"
+    SubredditExtractor(
+        archive_path=archive_root,
+        output_path=output_root,
+        subreddits=["science"],
+    ).run()
+
+    dataset_path = output_root / "science"
+    builder = TreeBuilder(dataset_path)
+    results = builder.build_all_months()
+
+    dataset = load_corpus(dataset_path)
+    comments_df = dataset.comments_dataframe(include_threads=True)
+    thread = dataset.get_thread("s1")
+    month_two_rows = dataset.comments_dataframe(month="2020-02", include_threads=True)
+
+    assert results == {"2020-01": 1, "2020-02": 1}
+    assert {"depth", "thread_size", "missing_parent", "submission_title"} <= set(comments_df.columns)
+    assert thread is not None
+    assert thread.comment_count == 2
+    assert int(comments_df.loc[comments_df["id"] == "c1", "depth"].iloc[0]) == 0
+    assert int(comments_df.loc[comments_df["id"] == "c2", "depth"].iloc[0]) == 1
+    assert bool(month_two_rows.loc[month_two_rows["id"] == "c5", "missing_parent"].iloc[0]) is True
+
+
+def test_detects_signals_and_loader_joins_them(tmp_path):
+    archive_root = _archive_fixture(tmp_path)
+    output_root = tmp_path / "extracted"
+    SubredditExtractor(
+        archive_path=archive_root,
+        output_path=output_root,
+        subreddits=["science"],
+    ).run()
+
+    dataset_path = output_root / "science"
+    TreeBuilder(dataset_path).build_all_months()
+    detector = SignalDetector(
+        dataset_path,
+        detectors=[
+            RegexDetector("mentions_climate", r"climate", record_type="both"),
+            AuthorIsOPDetector("op_comment"),
+        ],
+    )
+    results = detector.run_all_months()
+
+    dataset = load_corpus(dataset_path)
+    comments_df = dataset.comments_dataframe(include_threads=True)
+    submissions_df = dataset.submissions_dataframe()
+    signal_rows = read_parquet_records(dataset_path / "signals" / "2020-01.parquet")
+    signals_metadata = read_json(dataset_path / "signals.json")
+
+    assert results["2020-01"] >= 2
+    assert signals_metadata["months_processed"] == 2
+    assert any(
+        row["record_type"] == "submission"
+        and row["record_id"] == "s1"
+        and row["mentions_climate"] is True
+        for row in signal_rows
+    )
+    assert "mentions_climate" in comments_df.columns
+    assert "mentions_climate" in submissions_df.columns
+    assert bool(submissions_df.loc[submissions_df["id"] == "s1", "mentions_climate"].iloc[0]) is True
+
+
+def test_cli_keyword_config_and_smoke_analysis(tmp_path, monkeypatch, capsys):
+    archive_root = _archive_fixture(tmp_path)
+    output_root = tmp_path / "extracted"
+    SubredditExtractor(
+        archive_path=archive_root,
+        output_path=output_root,
+        subreddits=["science"],
+    ).run()
+
+    dataset_path = output_root / "science"
+    tracking_root = tmp_path / "tracking"
+    config_path = tmp_path / "keyword_sets.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "keyword_sets": [
+                    {"name": "climate", "terms": ["climate", "warming"], "regexes": [r"carbon\s+tax"]},
+                    {"name": "policy", "terms": ["policy"]},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "pushshiftreader",
+            "track",
+            str(dataset_path),
+            "--output",
+            str(tracking_root),
+            "--keyword-config",
+            str(config_path),
+        ],
+    )
+    cli_main()
+
+    report = build_smoke_report(dataset_path, tracking_root, top_n=5)
+    assert not report["monthly_summary"].empty
+    assert not report["tracking_monthly_counts"].empty
+    assert not report["tracking_top_terms"].empty
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "pushshiftreader",
+            "analyze-smoke",
+            str(dataset_path),
+            "--tracking",
+            str(tracking_root),
+            "--top-n",
+            "5",
+        ],
+    )
+    cli_main()
+    output = capsys.readouterr().out
+
+    assert "Monthly summary:" in output
+    assert "Tracking monthly counts:" in output
+    assert "Top 5 tracked terms:" in output
+
+
+def test_cli_catalogue_command(tmp_path, monkeypatch, capsys):
+    archive_root = _archive_fixture(tmp_path)
+    catalogue_root = tmp_path / "catalogue"
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "pushshiftreader",
+            "--quiet",
+            "catalogue",
+            "--archive",
+            str(archive_root),
+            "--output",
+            str(catalogue_root),
+            "--progress-interval",
+            "1",
+        ],
+    )
+    cli_main()
+    output = capsys.readouterr().out
+
+    assert "Catalogue complete" in output
+    assert (catalogue_root / "catalogue.parquet").exists()
+    assert (catalogue_root / "subreddit_index.parquet").exists()
+
+
+def test_cli_detect_signals_command(tmp_path, monkeypatch, capsys):
+    archive_root = _archive_fixture(tmp_path)
+    output_root = tmp_path / "extracted"
+    SubredditExtractor(
+        archive_path=archive_root,
+        output_path=output_root,
+        subreddits=["science"],
+    ).run()
+    TreeBuilder(output_root / "science").build_all_months()
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "pushshiftreader",
+            "detect-signals",
+            str(output_root / "science"),
+            "--preset",
+            "general",
+            "--regex-signal",
+            "mentions_climate=both:climate",
+        ],
+    )
+    cli_main()
+    output = capsys.readouterr().out
+
+    assert "Signal detection complete" in output
+    assert (output_root / "science" / "signals" / "2020-01.parquet").exists()
+
+
+def test_crosssub_builds_overlap_from_author_summaries(tmp_path):
+    archive_root = _archive_fixture(tmp_path)
+    output_root = tmp_path / "extracted"
+    SubredditExtractor(
+        archive_path=archive_root,
+        output_path=output_root,
+        subreddits=["science", "AskReddit"],
+    ).run()
+
+    crosssub_root = tmp_path / "crosssub"
+    index = CrossSubIndex.from_directory(output_root)
+    index.build(min_subreddits=2)
+    result = index.save(crosssub_root)
+
+    activity_rows = read_parquet_records(crosssub_root / "author_activity.parquet")
+    summary_rows = read_parquet_records(crosssub_root / "author_summary.parquet")
+    metadata = read_json(crosssub_root / "crosssub.json")
+
+    assert result["authors"] == 1
+    assert result["pairs"] == 2
+    assert metadata["authors"] == 1
+    assert any(row["author"] == "alice" and row["subreddit"] == "AskReddit" for row in activity_rows)
+    assert any(
+        row["author"] == "alice"
+        and row["n_subreddits"] == 2
+        and row["subreddits"] == "AskReddit|science"
+        for row in summary_rows
+    )
+
+
+def test_cli_crosssub_command(tmp_path, monkeypatch, capsys):
+    archive_root = _archive_fixture(tmp_path)
+    output_root = tmp_path / "extracted"
+    SubredditExtractor(
+        archive_path=archive_root,
+        output_path=output_root,
+        subreddits=["science", "AskReddit"],
+    ).run()
+
+    crosssub_root = tmp_path / "crosssub"
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "pushshiftreader",
+            "cross-sub-index",
+            "--extracted",
+            str(output_root),
+            "--output",
+            str(crosssub_root),
+            "--min-subreddits",
+            "2",
+        ],
+    )
+    cli_main()
+    output = capsys.readouterr().out
+
+    assert "Cross-subreddit index complete" in output
+    assert (crosssub_root / "author_activity.parquet").exists()
+    assert (crosssub_root / "author_summary.parquet").exists()

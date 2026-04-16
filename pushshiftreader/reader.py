@@ -22,6 +22,7 @@ class ReadProgress:
     total_bytes: int
     lines_read: int
     errors: int
+    is_final: bool = False
     
     @property
     def percent(self) -> float:
@@ -160,7 +161,8 @@ def read_zst_records(
                 bytes_read=bytes_read,
                 total_bytes=total_bytes,
                 lines_read=lines_read,
-                errors=errors
+                errors=errors,
+                is_final=False,
             )
             progress_callback(progress)
     
@@ -170,7 +172,8 @@ def read_zst_records(
             bytes_read=total_bytes,
             total_bytes=total_bytes,
             lines_read=lines_read,
-            errors=errors
+            errors=errors,
+            is_final=True,
         )
         progress_callback(progress)
 

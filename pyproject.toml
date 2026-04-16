@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pushshiftreader"
-version = "0.3.0"
-description = "Extract and analyze Reddit data from Pushshift archives"
+version = "1.0.0"
+description = "Canonical Reddit corpus extraction and longitudinal keyword tracking for Pushshift archives"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.8"
 authors = [
-    {name = "Your Name", email = "you@example.com"}
+    {name = "alexiamhe93"}
 ]
 keywords = ["reddit", "pushshift", "data", "analysis", "research"]
 classifiers = [
@@ -28,6 +28,7 @@ classifiers = [
 ]
 
 dependencies = [
+    "pyarrow>=15.0.0",
     "zstandard>=0.20.0",
 ]
 
@@ -53,10 +54,10 @@ all = [
 pushshiftreader = "pushshiftreader.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/yourusername/pushshiftreader"
-Documentation = "https://github.com/yourusername/pushshiftreader#readme"
-Repository = "https://github.com/yourusername/pushshiftreader"
-Issues = "https://github.com/yourusername/pushshiftreader/issues"
+Homepage = "https://github.com/alexiamhe93/pushshiftreader"
+Documentation = "https://github.com/alexiamhe93/pushshiftreader#readme"
+Repository = "https://github.com/alexiamhe93/pushshiftreader"
+Issues = "https://github.com/alexiamhe93/pushshiftreader/issues"
 
 [tool.setuptools.packages.find]
 include = ["pushshiftreader*"]
