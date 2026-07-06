@@ -57,7 +57,20 @@ from .reddit_api import (
     normalize_submission,
 )
 from .reader import ReadProgress, ZstReader, count_records, read_zst_lines, read_zst_records
-from .searcher import SearchResult, SearchStats, WordSearcher, assemble_search_results
+from .search import (
+    DDRScorer,
+    KeyedVectorsModel,
+    SearchBackend,
+    SearchResult,
+    SearchStats,
+    SemanticResult,
+    SemanticSearcher,
+    VectorModel,
+    WordSearcher,
+    assemble_search_results,
+    search_epochs,
+    train_epoch_model,
+)
 from .signals import AuthorIsOPDetector, Detector, RegexDetector, ScoreDetector, SignalDetector
 from .storage import (
     COMMENT_FIELDS,
@@ -126,13 +139,21 @@ __all__ = [
     "RedditAPIError",
     "RedditCommentFetcher",
     "RedditSubmissionScraper",
+    "DDRScorer",
+    "KeyedVectorsModel",
     "RegexDetector",
     "ScoreDetector",
+    "SearchBackend",
     "SearchResult",
     "SearchStats",
+    "SemanticResult",
+    "SemanticSearcher",
     "SignalDetector",
+    "VectorModel",
     "WordSearcher",
     "assemble_search_results",
+    "search_epochs",
+    "train_epoch_model",
     "Submission",
     "StickiedCommentDetector",
     "SubredditData",

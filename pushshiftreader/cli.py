@@ -3,6 +3,7 @@ CLI for canonical subreddit extraction, keyword tracking, and thread building.
 """
 
 import argparse
+import json
 import logging
 import sys
 from datetime import datetime, timedelta, timezone
@@ -24,7 +25,8 @@ from .reddit_api import (
     RedditSubmissionScraper,
 )
 from .emergence import run_emergence
-from .sampling import STRATEGIES, Sampler
+from .sampling import STRATEGIES, Sampler, load_records
+from .search import WordSearcher
 from .selection import Selector, SubredditSliceSpec, ThreadSpec, TurnSpec
 from .signals import RegexDetector, SignalDetector
 from .tracking import KeywordSet, KeywordTracker, load_keyword_sets, merge_keyword_sets
@@ -206,6 +208,65 @@ def cmd_slice(args) -> None:
     print(f"  Epochs:             {len(result.epochs)}")
     print(f"  Rows written:       {sum(result.rows_written.values()):,}")
     print(f"  Output root:        {result.output_root}")
+
+
+def cmd_search(args) -> None:
+    if args.backend == "keyword":
+        if not (args.archive and args.pattern):
+            raise ValueError("Keyword search requires --archive and --pattern")
+        searcher = WordSearcher(
+            archive_path=args.archive,
+            output_path=args.output,
+            pattern=args.pattern,
+            case_sensitive=args.case_sensitive,
+            output_format=args.format,
+            workers=args.workers,
+            force=args.force,
+            show_progress=not args.quiet,
+        )
+        result = searcher.run(start_month=args.start_month, end_month=args.end_month)
+        print("\nKeyword search complete")
+        print(f"  Pattern:            {args.pattern!r}")
+        print(f"  Months processed:   {result.months_processed}")
+        print(f"  Comments matched:   {result.total_comments:,}")
+        print(f"  Submissions matched:{result.total_submissions:,}")
+        print(f"  Output root:        {args.output}")
+        return
+
+    # Semantic backend: runs within a keyword pool by construction — it only
+    # accepts record files (a search/tracking output or corpus slice), never
+    # raw archives, so the concept-neutral floor always defines membership.
+    from .search.semantic import KeyedVectorsModel, SemanticSearcher
+
+    if not args.pool:
+        raise ValueError("Semantic search requires --pool (a keyword-pool or corpus-slice path)")
+    if not args.vectors:
+        raise ValueError("Semantic search requires --vectors (gensim KeyedVectors file)")
+    if not args.seeds:
+        raise ValueError("Semantic search requires --seeds (JSON file: {seed_name: [terms...]})")
+    if args.threshold is None and args.top_k is None:
+        raise ValueError("Semantic search requires --threshold and/or --top-k")
+
+    with open(args.seeds, "r", encoding="utf-8") as handle:
+        seeds = json.load(handle)
+
+    model = KeyedVectorsModel.load(args.vectors)
+    searcher = SemanticSearcher(
+        model=model,
+        seeds=seeds,
+        threshold=args.threshold,
+        top_k=args.top_k,
+    )
+    pool_records = []
+    for path in args.pool:
+        pool_records.extend(load_records(path))
+    result = searcher.run(pool_records, pool_paths=args.pool, epoch=args.epoch)
+    hits_path = result.write(args.output)
+    print("\nSemantic search complete")
+    print(f"  Model:              {model.name} ({model.version})")
+    print(f"  Pool records:       {result.manifest.counts['pool_records']:,}")
+    print(f"  Hits:               {len(result.hits):,}")
+    print(f"  Output:             {hits_path}")
 
 
 def cmd_sample(args) -> None:
@@ -576,6 +637,26 @@ def main() -> None:
     slice_parser.add_argument("--end-month")
     slice_parser.add_argument("--force", action="store_true")
 
+    search_parser = subparsers.add_parser("search", help="Search archives (keyword) or a record pool (semantic)")
+    search_parser.add_argument("--backend", choices=["keyword", "semantic"], default="keyword")
+    search_parser.add_argument("--output", "-o", type=Path, required=True)
+    # keyword backend (archive-scale; defines pool membership)
+    search_parser.add_argument("--archive", "-a", type=Path, help="Raw archive root (keyword backend)")
+    search_parser.add_argument("--pattern", "-p", help="Regex pattern (keyword backend)")
+    search_parser.add_argument("--case-sensitive", action="store_true")
+    search_parser.add_argument("--format", choices=["jsonl", "csv", "both"], default="jsonl")
+    search_parser.add_argument("--workers", "-w", type=int, default=1)
+    search_parser.add_argument("--start-month")
+    search_parser.add_argument("--end-month")
+    search_parser.add_argument("--force", action="store_true")
+    # semantic backend (record-scale; sub-classifies within a pool)
+    search_parser.add_argument("--pool", nargs="+", type=Path, help="Keyword-pool or corpus-slice record paths")
+    search_parser.add_argument("--vectors", type=Path, help="gensim KeyedVectors file (per-epoch vectors)")
+    search_parser.add_argument("--seeds", type=Path, help="JSON file mapping seed-set name -> seed terms")
+    search_parser.add_argument("--threshold", type=float, help="Minimum best-seed cosine score")
+    search_parser.add_argument("--top-k", type=int, help="Keep top-k hits by score")
+    search_parser.add_argument("--epoch", help="Epoch label recorded in the manifest")
+
     sample_parser = subparsers.add_parser("sample", help="Run a seeded sampling strategy over records (+ manifest)")
     sample_parser.add_argument("input", nargs="+", type=Path, help="Record files or directories (parquet/jsonl/csv)")
     sample_parser.add_argument("--output", "-o", type=Path, required=True)
@@ -747,6 +828,8 @@ def main() -> None:
             cmd_extract_thread(args)
         elif args.command == "slice":
             cmd_slice(args)
+        elif args.command == "search":
+            cmd_search(args)
         elif args.command == "sample":
             cmd_sample(args)
         elif args.command == "emergence":

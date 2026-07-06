@@ -499,3 +499,141 @@ def test_cli_sample_and_emergence(tmp_path, monkeypatch, capsys):
     cli_main()
     assert "Emergence detection complete" in capsys.readouterr().out
     assert (emergence_out / "emergence.json").exists()
+
+
+# ---- search backends ---------------------------------------------------------
+
+
+def test_searcher_shim_and_search_package_expose_same_objects():
+    from pushshiftreader.searcher import WordSearcher as shim_ws
+    from pushshiftreader.search.keyword import WordSearcher as pkg_ws
+    from pushshiftreader.search import SearchBackend, SemanticSearcher  # noqa: F401
+
+    assert shim_ws is pkg_ws
+
+
+class _FakeVectorModel:
+    """Deterministic per-word vectors seeded by the word itself."""
+
+    name = "fake-vectors"
+    version = "test-1"
+
+    def __init__(self, vocab):
+        import numpy as np
+        import random as _random
+
+        self._vectors = {}
+        for word in vocab:
+            rng = _random.Random(word)
+            self._vectors[word] = np.array([rng.uniform(-1, 1) for _ in range(8)])
+
+    def vector(self, word):
+        return self._vectors.get(word)
+
+
+def _semantic_fixture():
+    """Pool where medical-seed docs and lay-seed docs share exact vocab with seeds."""
+    pool = [
+        {"id": "m1", "created_utc": 100, "body": "asperger diagnosis clinical"},
+        {"id": "m2", "created_utc": 200, "body": "clinical diagnosis asperger disorder"},
+        {"id": "l1", "created_utc": 300, "body": "neurodivergent identity community"},
+        {"id": "l2", "created_utc": 400, "body": "community identity neurodivergent pride"},
+        {"id": "x1", "created_utc": 500, "body": "zzz qqq www"},  # OOV -> dropped
+    ]
+    vocab = {
+        "asperger", "diagnosis", "clinical", "disorder",
+        "neurodivergent", "identity", "community", "pride",
+    }
+    seeds = {
+        "medical": ["asperger", "clinical", "diagnosis"],
+        "lay": ["neurodivergent", "identity", "community"],
+    }
+    return pool, _FakeVectorModel(vocab), seeds
+
+
+def test_semantic_search_tags_nearest_seed_and_scores():
+    from pushshiftreader.search.semantic import SemanticSearcher
+
+    pool, model, seeds = _semantic_fixture()
+    hits = SemanticSearcher(model, seeds, threshold=-1.0).search(pool)
+
+    by_id = {hit["id"]: hit for hit in hits}
+    assert "x1" not in by_id  # fully OOV record cannot be scored
+    assert by_id["m1"]["nearest_seed"] == "medical"
+    assert by_id["m2"]["nearest_seed"] == "medical"
+    assert by_id["l1"]["nearest_seed"] == "lay"
+    assert by_id["l2"]["nearest_seed"] == "lay"
+    assert set(by_id["m1"]["seed_scores"]) == {"medical", "lay"}
+    # scores sorted descending
+    scores = [hit["semantic_score"] for hit in hits]
+    assert scores == sorted(scores, reverse=True)
+
+
+def test_semantic_search_run_emits_model_versioned_manifest(tmp_path):
+    from pushshiftreader.search.semantic import SemanticSearcher
+
+    pool, model, seeds = _semantic_fixture()
+    result = SemanticSearcher(model, seeds, top_k=2).run(pool, epoch="2020-Q1")
+    hits_path = result.write(tmp_path / "semantic")
+
+    assert len(result.hits) == 2
+    manifest = read_json(tmp_path / "semantic" / "manifest.json")
+    assert manifest["operation"] == "search"
+    assert manifest["params"]["backend"] == "semantic"
+    assert manifest["params"]["epoch"] == "2020-Q1"
+    assert manifest["params"]["seeds"]["medical"] == ["asperger", "clinical", "diagnosis"]
+    assert manifest["model"] == "fake-vectors"
+    assert manifest["model_version"] == "test-1"
+    assert manifest["counts"] == {"pool_records": 5, "hits": 2}
+    assert hits_path.exists()
+
+
+def test_search_epochs_uses_period_native_models_and_seeds():
+    from pushshiftreader.search.semantic import search_epochs
+
+    pool, model, seeds = _semantic_fixture()
+    pools = {"2020-01": pool[:2], "2020-02": pool[2:4]}
+    results = search_epochs(
+        pools_by_epoch=pools,
+        models_by_epoch={"2020-01": model, "2020-02": model},
+        seeds_by_epoch={
+            "2020-01": {"medical": ["asperger", "clinical"]},
+            "2020-02": {"lay": ["neurodivergent", "community"]},
+        },
+        threshold=-1.0,
+    )
+
+    assert set(results) == {"2020-01", "2020-02"}
+    jan = results["2020-01"]
+    feb = results["2020-02"]
+    assert jan.manifest.params["seeds"] == {"medical": ["asperger", "clinical"]}
+    assert feb.manifest.params["seeds"] == {"lay": ["neurodivergent", "community"]}
+    assert all(hit["nearest_seed"] == "medical" for hit in jan.hits)
+    assert all(hit["nearest_seed"] == "lay" for hit in feb.hits)
+
+
+def test_semantic_searcher_requires_gate():
+    import pytest
+    from pushshiftreader.search.semantic import SemanticSearcher
+
+    _, model, seeds = _semantic_fixture()
+    with pytest.raises(ValueError):
+        SemanticSearcher(model, seeds)  # no threshold, no top_k
+
+
+def test_cli_search_keyword_backend(tmp_path, monkeypatch, capsys):
+    archive_root = _archive_fixture(tmp_path)
+    out_root = tmp_path / "search_cli"
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "pushshiftreader", "--quiet", "search",
+            "--archive", str(archive_root),
+            "--pattern", "climate",
+            "--output", str(out_root),
+        ],
+    )
+    cli_main()
+    output = capsys.readouterr().out
+    assert "Keyword search complete" in output
+    assert read_json(out_root / "manifest.json")["params"]["backend"] == "keyword"
