@@ -11,6 +11,7 @@ __author__ = "alexiamhe93"
 from .analysis import build_smoke_report
 from .catalogue import ArchiveCatalogue, SubredditIndex
 from .crosssub import CrossSubIndex
+from .dreams import DreamCorpusExporter, DreamSubredditDiscoverer, assess_submission_for_dreams
 from .extractor import ExtractionResult, ExtractionStats, SubredditExtractor
 from .loader import (
     CorpusDataset,
@@ -31,6 +32,18 @@ from .presets import (
     StickiedCommentDetector,
     TopLevelCommentDetector,
     get_detectors,
+)
+from .reddit_api import (
+    DEFAULT_SUBREDDITS,
+    RedditAPICredentials,
+    RedditAPIClient,
+    RedditAPIError,
+    RedditCommentFetcher,
+    RedditSubmissionScraper,
+    clean_subreddit_name,
+    flatten_comment_listing,
+    normalize_comment,
+    normalize_submission,
 )
 from .reader import ReadProgress, ZstReader, count_records, read_zst_lines, read_zst_records
 from .signals import AuthorIsOPDetector, Detector, RegexDetector, ScoreDetector, SignalDetector
@@ -74,12 +87,20 @@ __all__ = [
     "DeltaAwardedDetector",
     "DepthDetector",
     "Detector",
+    "DEFAULT_SUBREDDITS",
+    "DreamCorpusExporter",
+    "DreamSubredditDiscoverer",
     "ExtractionResult",
     "ExtractionStats",
     "KeywordSet",
     "KeywordTracker",
     "ModDistinguishedDetector",
     "ReadProgress",
+    "RedditAPICredentials",
+    "RedditAPIClient",
+    "RedditAPIError",
+    "RedditCommentFetcher",
+    "RedditSubmissionScraper",
     "RegexDetector",
     "ScoreDetector",
     "SignalDetector",
@@ -111,5 +132,10 @@ __all__ = [
     "merge_keyword_sets",
     "read_zst_lines",
     "read_zst_records",
+    "assess_submission_for_dreams",
+    "clean_subreddit_name",
+    "flatten_comment_listing",
+    "normalize_comment",
+    "normalize_submission",
     "setup_logging",
 ]

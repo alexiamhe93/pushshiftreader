@@ -42,6 +42,56 @@ pip install -e ".[progress]"   # tqdm support
 pip install -e ".[all]"        # everything
 ```
 
+## Live Reddit API Scraping
+
+For recent Reddit data, use `scrape-reddit`. It authenticates with a Reddit app through OAuth client credentials and writes newline-delimited JSON files for submissions and comments.
+
+If you prefer not to put credentials in your shell, run `notebooks/reddit_api_scrape_wales.ipynb`. It prompts for the Reddit secret with a hidden `getpass` field and then calls the same CLI under the hood.
+
+Set credentials in your shell:
+
+```bash
+export REDDIT_CLIENT_ID="your-app-client-id"
+export REDDIT_CLIENT_SECRET="your-app-secret"
+export REDDIT_USER_AGENT="macos:pushshiftreader:0.1 by u/your_username"
+export REDDIT_AUTH_MODE="client_credentials"
+```
+
+If your Reddit app is an installed app, use `REDDIT_AUTH_MODE=installed_client` and leave `REDDIT_CLIENT_SECRET` blank.
+
+Scrape the Welsh target subreddits (`r/wales`, `r/Cardiff`, `r/southwales`, `r/northwales`):
+
+```bash
+pushshiftreader scrape-reddit \
+  --output ./runs/reddit-api/wales-communities \
+  --sort new \
+  --days 30 \
+  --max-submissions 100
+```
+
+This creates one folder per subreddit:
+
+```text
+runs/reddit-api/wales-communities/
+  metadata.json
+  wales/submissions.jsonl
+  wales/comments.jsonl
+  Cardiff/submissions.jsonl
+  Cardiff/comments.jsonl
+```
+
+Useful options:
+
+- `--subreddits wales Cardiff southwales northwales` overrides the defaults.
+- `--comments-limit 500` controls the maximum comment listing size per submission.
+- `--comment-depth 3` limits nested comment depth.
+- `--skip-comments` downloads submissions only, which is best for a broad first pass.
+- `--days 30` keeps submissions from the past 30 days.
+- `--since 2026-04-01 --until 2026-04-30` keeps an explicit UTC date range.
+- `--include-raw` preserves each API object under a `raw` field.
+
+Live API scrape output is JSONL rather than the Pushshift Parquet layout. The notebook includes a CSV export cell that combines all subreddit submission rows into `all_submissions.csv` and all comment rows into `all_comments.csv`.
+
 ## Raw Archive Layout
 
 The package expects a raw archive root like this:
@@ -186,7 +236,26 @@ Then rebuild or filter the subreddit-level index:
 pushshiftreader subreddit-index ./runs/catalogue --min-records 1000
 ```
 
-### 7. Build a cross-subreddit author index
+### 7. Discover dream-report subreddits
+
+For dream-corpus enrichment, scan submissions and rank communities that look like firsthand dream-report spaces:
+
+```bash
+pushshiftreader discover-dream-subreddits \
+  --archive /path/to/reddit \
+  --catalogue ./runs/catalogue \
+  --output ./runs/dream-discovery \
+  --start-month 2024-01 \
+  --end-month 2024-12
+```
+
+This writes:
+
+- `candidates.csv`: ranked machine-readable candidate table
+- `shortlist.txt`: quick human-readable shortlist
+- `metadata.json`: run metadata
+
+### 8. Build a cross-subreddit author index
 
 Once you have multiple extracted corpora in one directory:
 
@@ -205,6 +274,19 @@ pushshiftreader cross-sub-index \
   --output ./runs/crosssub \
   --min-subreddits 2
 ```
+
+### 9. Export extracted dream submissions for CassiusDay
+
+After extracting approved dream subreddits, convert their submission corpora into the flat dream-source schema used by `CassiusDay_program`:
+
+```bash
+pushshiftreader export-dreams \
+  --source ./runs/extracted \
+  --subreddits DreamJournal LucidDreaming \
+  --output ./runs/dream_exports/reddit_dreams.jsonl
+```
+
+The export is JSONL and preserves provenance fields such as subreddit, post ID, permalink, and author.
 
 ## Output Layout
 

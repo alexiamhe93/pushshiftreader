@@ -29,3 +29,10 @@ htmlcov/
 
 # Local pilot data
 playground/
+runs/
+
+# Local credentials
+.env
+.env.*
+!.env.example
+!.env.reddit.example

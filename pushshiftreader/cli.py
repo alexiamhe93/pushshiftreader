@@ -5,15 +5,24 @@ CLI for canonical subreddit extraction, keyword tracking, and thread building.
 import argparse
 import logging
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List
 
 from .analysis import build_smoke_report
 from .catalogue import ArchiveCatalogue, SubredditIndex
 from .crosssub import CrossSubIndex
+from .dreams import DreamCorpusExporter, DreamSubredditDiscoverer
 from .extractor import SubredditExtractor
 from .loader import load_corpus
 from .presets import get_detectors
+from .reddit_api import (
+    DEFAULT_SUBREDDITS,
+    RedditAPICredentials,
+    RedditAPIClient,
+    RedditCommentFetcher,
+    RedditSubmissionScraper,
+)
 from .signals import RegexDetector, SignalDetector
 from .tracking import KeywordSet, KeywordTracker, load_keyword_sets, merge_keyword_sets
 from .trees import TreeBuilder
@@ -79,6 +88,49 @@ def _parse_signal_detectors(args):
     if not detectors:
         raise ValueError("Provide --preset and/or at least one --regex-signal")
     return detectors
+
+
+def _parse_scrape_datetime(value: str, is_until: bool = False) -> float:
+    text = value.strip()
+    if not text:
+        raise ValueError("Date values cannot be empty")
+    try:
+        if len(text) == 10 and text[4] == "-" and text[7] == "-":
+            parsed = datetime.strptime(text, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            if is_until:
+                parsed += timedelta(days=1)
+        else:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            parsed = parsed.astimezone(timezone.utc)
+    except ValueError as exc:
+        raise ValueError(f"Could not parse date/datetime: {value}") from exc
+    return parsed.timestamp()
+
+
+def _date_window_from_args(args):
+    if args.days is not None and args.since:
+        raise ValueError("Use either --days or --since, not both")
+    since_utc = None
+    until_utc = None
+    if args.days is not None:
+        if args.days < 1:
+            raise ValueError("--days must be at least 1")
+        until_dt = datetime.now(timezone.utc)
+        since_utc = (until_dt - timedelta(days=args.days)).timestamp()
+        until_utc = until_dt.timestamp()
+    if args.since:
+        since_utc = _parse_scrape_datetime(args.since)
+    if args.until:
+        until_utc = _parse_scrape_datetime(args.until, is_until=True)
+    return since_utc, until_utc
+
+
+def _format_utc_timestamp(value):
+    if value is None:
+        return "none"
+    return datetime.fromtimestamp(value, tz=timezone.utc).isoformat(timespec="seconds")
 
 
 def cmd_extract(args) -> None:
@@ -161,6 +213,123 @@ def cmd_cross_sub_index(args) -> None:
     print(f"  Authors found:      {result['authors']:,}")
     print(f"  Activity rows:      {result['pairs']:,}")
     print(f"  Output root:        {args.output}")
+
+
+def cmd_discover_dream_subreddits(args) -> None:
+    discoverer = DreamSubredditDiscoverer(
+        archive_path=args.archive,
+        output_path=args.output,
+        catalogue_path=args.catalogue,
+        show_progress=not args.quiet,
+        progress_interval=args.progress_interval,
+        min_words=args.min_words,
+        min_submissions=args.min_submissions,
+        min_matches=args.min_matches,
+        top_n=args.top_n,
+    )
+    result = discoverer.run(
+        start_month=args.start_month,
+        end_month=args.end_month,
+    )
+    print("\nDream subreddit discovery complete")
+    print(f"  Months processed:   {result['months_processed']}")
+    print(f"  Candidates written: {result['candidates_written']:,}")
+    print(f"  Output root:        {args.output}")
+
+
+def cmd_export_dreams(args) -> None:
+    exporter = DreamCorpusExporter(
+        source_path=args.source,
+        output_path=args.output,
+        min_words=args.min_words,
+        include_nsfw=args.include_nsfw,
+        subreddits=args.subreddits,
+    )
+    result = exporter.run()
+    print("\nDream export complete")
+    print(f"  Datasets processed: {result['datasets_processed']}")
+    print(f"  Rows written:       {result['rows_written']:,}")
+    print(f"  Output path:        {args.output}")
+
+
+def cmd_scrape_reddit(args) -> None:
+    since_utc, until_utc = _date_window_from_args(args)
+    if args.client_id or args.client_secret or args.user_agent:
+        if not (args.client_id and args.user_agent):
+            raise ValueError("Provide --client-id and --user-agent, plus --client-secret unless using installed_client")
+        if args.auth_mode == "client_credentials" and not args.client_secret:
+            raise ValueError("Provide --client-secret for client_credentials auth, or use --auth-mode installed_client")
+        credentials = RedditAPICredentials(
+            client_id=args.client_id,
+            user_agent=args.user_agent,
+            client_secret=args.client_secret or "",
+            auth_mode=args.auth_mode,
+            device_id=args.device_id or "",
+        )
+    else:
+        credentials = RedditAPICredentials.from_env()
+
+    client = RedditAPIClient(credentials=credentials, timeout=args.timeout)
+    scraper = RedditSubmissionScraper(
+        client=client,
+        output_path=args.output,
+        subreddits=args.subreddits,
+        sort=args.sort,
+        max_submissions=args.max_submissions,
+        page_limit=args.page_limit,
+        comments_limit=args.comments_limit,
+        comment_depth=args.comment_depth,
+        include_raw=args.include_raw,
+        since_utc=since_utc,
+        until_utc=until_utc,
+        fetch_comments=not args.skip_comments,
+    )
+    result = scraper.run()
+    print("\nReddit API scrape complete")
+    print(f"  Subreddits:         {', '.join(result['subreddits'])}")
+    print(f"  Submissions:        {result['total_submissions']:,}")
+    print(f"  Comments:           {result['total_comments']:,}")
+    if since_utc or until_utc:
+        print(f"  Since UTC:          {_format_utc_timestamp(since_utc)}")
+        print(f"  Until UTC:          {_format_utc_timestamp(until_utc)}")
+    print(f"  Output root:        {args.output}")
+
+
+def _reddit_credentials_from_args(args):
+    if args.client_id or args.client_secret or args.user_agent:
+        if not (args.client_id and args.user_agent):
+            raise ValueError("Provide --client-id and --user-agent, plus --client-secret unless using installed_client")
+        if args.auth_mode == "client_credentials" and not args.client_secret:
+            raise ValueError("Provide --client-secret for client_credentials auth, or use --auth-mode installed_client")
+        return RedditAPICredentials(
+            client_id=args.client_id,
+            user_agent=args.user_agent,
+            client_secret=args.client_secret or "",
+            auth_mode=args.auth_mode,
+            device_id=args.device_id or "",
+        )
+    return RedditAPICredentials.from_env()
+
+
+def cmd_fetch_reddit_comments(args) -> None:
+    client = RedditAPIClient(credentials=_reddit_credentials_from_args(args), timeout=args.timeout)
+    fetcher = RedditCommentFetcher(
+        client=client,
+        source_path=args.source,
+        output_path=args.output,
+        subreddits=args.subreddits,
+        comments_limit=args.comments_limit,
+        comment_depth=args.comment_depth,
+        include_raw=args.include_raw,
+        max_submissions=args.max_submissions,
+        force=args.force,
+    )
+    result = fetcher.run()
+    print("\nReddit comment fetch complete")
+    print(f"  Subreddits:         {', '.join(result['subreddits'])}")
+    print(f"  Submissions:        {result['total_submissions_processed']:,}")
+    print(f"  Comments:           {result['total_comments']:,}")
+    print(f"  Output root:        {result['output_path']}")
 
 
 def cmd_detect_signals(args) -> None:
@@ -312,6 +481,83 @@ def main() -> None:
     crosssub_parser.add_argument("--subreddits", "-s", nargs="+")
     crosssub_parser.add_argument("--min-subreddits", type=int, default=2)
 
+    discover_parser = subparsers.add_parser(
+        "discover-dream-subreddits",
+        help="Rank subreddits likely to contain firsthand dream reports",
+    )
+    discover_parser.add_argument("--archive", "-a", type=Path, required=True)
+    discover_parser.add_argument("--output", "-o", type=Path, required=True)
+    discover_parser.add_argument("--catalogue", type=Path)
+    discover_parser.add_argument("--start-month")
+    discover_parser.add_argument("--end-month")
+    discover_parser.add_argument("--min-words", type=int, default=20)
+    discover_parser.add_argument("--min-submissions", type=int, default=10)
+    discover_parser.add_argument("--min-matches", type=int, default=3)
+    discover_parser.add_argument("--top-n", type=int, default=25)
+    discover_parser.add_argument("--progress-interval", type=int, default=250000)
+
+    export_dreams_parser = subparsers.add_parser(
+        "export-dreams",
+        help="Export extracted Reddit submissions into the CassiusDay dream-source schema",
+    )
+    export_dreams_parser.add_argument("--source", type=Path, required=True)
+    export_dreams_parser.add_argument("--output", "-o", type=Path, required=True)
+    export_dreams_parser.add_argument("--subreddits", "-s", nargs="+")
+    export_dreams_parser.add_argument("--min-words", type=int, default=20)
+    export_dreams_parser.add_argument("--include-nsfw", action="store_true")
+
+    scrape_parser = subparsers.add_parser(
+        "scrape-reddit",
+        help="Scrape recent submissions and comments from Reddit's OAuth API",
+    )
+    scrape_parser.add_argument("--output", "-o", type=Path, required=True)
+    scrape_parser.add_argument("--subreddits", "-s", nargs="+", default=DEFAULT_SUBREDDITS)
+    scrape_parser.add_argument("--sort", choices=["hot", "new", "rising", "top"], default="new")
+    scrape_parser.add_argument("--max-submissions", type=int, default=100)
+    scrape_parser.add_argument("--page-limit", type=int, default=100)
+    scrape_parser.add_argument("--comments-limit", type=int, default=500)
+    scrape_parser.add_argument("--comment-depth", type=int)
+    scrape_parser.add_argument("--skip-comments", action="store_true", help="Download submissions only")
+    scrape_parser.add_argument("--days", type=int, help="Only keep submissions from the last N days")
+    scrape_parser.add_argument("--since", help="Only keep submissions at or after YYYY-MM-DD or ISO datetime")
+    scrape_parser.add_argument("--until", help="Only keep submissions before YYYY-MM-DD or ISO datetime")
+    scrape_parser.add_argument("--include-raw", action="store_true")
+    scrape_parser.add_argument("--timeout", type=float, default=30.0)
+    scrape_parser.add_argument("--client-id", help="Defaults to REDDIT_CLIENT_ID")
+    scrape_parser.add_argument("--client-secret", help="Defaults to REDDIT_CLIENT_SECRET")
+    scrape_parser.add_argument("--user-agent", help="Defaults to REDDIT_USER_AGENT")
+    scrape_parser.add_argument(
+        "--auth-mode",
+        choices=["client_credentials", "installed_client"],
+        default="client_credentials",
+        help="OAuth mode. Use installed_client for Reddit installed apps.",
+    )
+    scrape_parser.add_argument("--device-id", help="Optional 20-30 character device ID for installed_client auth")
+
+    comments_parser = subparsers.add_parser(
+        "fetch-reddit-comments",
+        help="Fetch comments for an existing live Reddit API submissions scrape",
+    )
+    comments_parser.add_argument("--source", type=Path, required=True)
+    comments_parser.add_argument("--output", "-o", type=Path)
+    comments_parser.add_argument("--subreddits", "-s", nargs="+")
+    comments_parser.add_argument("--comments-limit", type=int, default=500)
+    comments_parser.add_argument("--comment-depth", type=int)
+    comments_parser.add_argument("--max-submissions", type=int)
+    comments_parser.add_argument("--include-raw", action="store_true")
+    comments_parser.add_argument("--force", action="store_true")
+    comments_parser.add_argument("--timeout", type=float, default=30.0)
+    comments_parser.add_argument("--client-id", help="Defaults to REDDIT_CLIENT_ID")
+    comments_parser.add_argument("--client-secret", help="Defaults to REDDIT_CLIENT_SECRET")
+    comments_parser.add_argument("--user-agent", help="Defaults to REDDIT_USER_AGENT")
+    comments_parser.add_argument(
+        "--auth-mode",
+        choices=["client_credentials", "installed_client"],
+        default="client_credentials",
+        help="OAuth mode. Use installed_client for Reddit installed apps.",
+    )
+    comments_parser.add_argument("--device-id", help="Optional 20-30 character device ID for installed_client auth")
+
     signals_parser = subparsers.add_parser("detect-signals", help="Run signal detectors over thread-aware corpora")
     signals_parser.add_argument("dataset", type=Path)
     signals_parser.add_argument("--month", "-m")
@@ -368,6 +614,14 @@ def main() -> None:
             cmd_subreddit_index(args)
         elif args.command == "cross-sub-index":
             cmd_cross_sub_index(args)
+        elif args.command == "discover-dream-subreddits":
+            cmd_discover_dream_subreddits(args)
+        elif args.command == "export-dreams":
+            cmd_export_dreams(args)
+        elif args.command == "scrape-reddit":
+            cmd_scrape_reddit(args)
+        elif args.command == "fetch-reddit-comments":
+            cmd_fetch_reddit_comments(args)
         elif args.command == "detect-signals":
             cmd_detect_signals(args)
         elif args.command == "track":

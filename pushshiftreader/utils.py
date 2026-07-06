@@ -4,6 +4,7 @@ Utility functions for logging, progress tracking, and path handling.
 
 import re
 import logging
+import sys
 from pathlib import Path
 from datetime import datetime
 from typing import List, Tuple, Optional, Iterator
@@ -36,7 +37,7 @@ def setup_logging(
     logger.handlers.clear()
     
     # Console handler
-    console = logging.StreamHandler()
+    console = logging.StreamHandler(stream=sys.__stderr__)
     console.setLevel(level)
     console.setFormatter(logging.Formatter(format_string))
     logger.addHandler(console)
