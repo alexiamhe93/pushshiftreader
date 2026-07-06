@@ -1,5 +1,12 @@
 # pushshiftreader — Research Integration Plan
 
+> **STATUS: EXECUTED 2026-07-06** — all four phases shipped (commits
+> ca295f7 → 0e5f342), 46 tests green, live e2e CLI run verified the
+> emergence → first_appearance loop. Phase-3 embedding decision resolved as
+> planned: DDR-first over per-epoch vectors (`search/semantic.py`), gensim
+> behind the optional `[semantic]` extra. This document is now the design
+> record, not a to-do list.
+
 Scope of this plan: make `pushshiftreader` a **data-sampling substrate** for social-science
 studies of *looping effects* (first study: how the concept of "autism" changes over time,
 Reddit corpus + parallel bibliometrics; Gillespie & Wagoner 2025).
