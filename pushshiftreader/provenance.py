@@ -54,6 +54,10 @@ def fingerprint_file(
         entry["exists"] = False
         return entry
 
+    if path.is_dir():
+        entry["is_dir"] = True
+        return entry
+
     size = path.stat().st_size
     entry["size_bytes"] = size
 

@@ -21,8 +21,16 @@ from .loader import (
     load_corpus,
     load_subreddit,
 )
+from .emergence import (
+    EmergencePoint,
+    EmergenceResult,
+    build_term_series,
+    detect_emergence,
+    run_emergence,
+)
 from .models import Comment, CommentNode, Submission, Thread
 from .provenance import Manifest, fingerprint_file, manifest_run, write_manifest
+from .sampling import STRATEGIES, SampleResult, Sampler, load_records
 from .selection import Selection, Selector, SubredditSliceSpec, ThreadSpec, TurnSpec
 from .windows import GRANULARITIES, TimeWindow, epoch_of, month_to_epoch, slice_corpus
 from .presets import (
@@ -96,8 +104,13 @@ __all__ = [
     "DreamSubredditDiscoverer",
     "ExtractionResult",
     "ExtractionStats",
+    "EmergencePoint",
+    "EmergenceResult",
     "GRANULARITIES",
     "KeywordSet",
+    "STRATEGIES",
+    "SampleResult",
+    "Sampler",
     "KeywordTracker",
     "Manifest",
     "Selection",
@@ -140,8 +153,12 @@ __all__ = [
     "SUBMISSION_SCHEMA",
     "count_records",
     "discover_archives",
+    "build_term_series",
+    "detect_emergence",
     "epoch_of",
     "fingerprint_file",
+    "load_records",
+    "run_emergence",
     "manifest_run",
     "month_to_epoch",
     "slice_corpus",

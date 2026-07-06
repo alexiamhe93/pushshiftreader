@@ -308,3 +308,194 @@ def test_cli_extract_turn_thread_and_slice(tmp_path, monkeypatch, capsys):
     cli_main()
     assert "Slicing complete" in capsys.readouterr().out
     assert (slice_out / "2020" / "comments.parquet").exists()
+
+
+# ---- sampling ---------------------------------------------------------------
+
+
+def _synthetic_records():
+    """60 records over 3 months, 2 subreddits, with matched-term tags."""
+    records = []
+    base = 1577836800  # 2020-01-01
+    month_offsets = [0, 31 * 86400, 60 * 86400]  # Jan, Feb, Mar 2020
+    for index in range(60):
+        month = index % 3
+        records.append(
+            {
+                "id": f"r{index:03d}",
+                "created_utc": base + month_offsets[month] + index,
+                "subreddit": "science" if index % 2 == 0 else "askreddit",
+                # term "rare" appears 6 times, "common" 54 times
+                "matched_terms": "rare" if index % 10 == 0 else "common",
+                "body": f"record {index}",
+            }
+        )
+    return records
+
+
+def test_random_sampling_is_deterministic_under_seed():
+    from pushshiftreader import Sampler
+
+    records = _synthetic_records()
+    first = Sampler("random", n=10, seed=42).sample(records)
+    second = Sampler("random", n=10, seed=42).sample(records)
+    different = Sampler("random", n=10, seed=43).sample(records)
+
+    assert [r["id"] for r in first] == [r["id"] for r in second]
+    assert [r["id"] for r in first] != [r["id"] for r in different]
+    assert len(first) == 10
+
+
+def test_stratified_time_draws_evenly_per_epoch():
+    from pushshiftreader import Sampler, epoch_of
+
+    records = _synthetic_records()
+    sampled = Sampler("stratified_time", n=9, seed=1).sample(records)
+    by_epoch = {}
+    for record in sampled:
+        by_epoch.setdefault(epoch_of(record["created_utc"]), []).append(record)
+    assert set(by_epoch) == {"2020-01", "2020-02", "2020-03"}
+    assert all(len(group) == 3 for group in by_epoch.values())
+
+
+def test_stratified_subreddit_draws_evenly():
+    from pushshiftreader import Sampler
+
+    sampled = Sampler("stratified_subreddit", n=10, seed=1).sample(_synthetic_records())
+    by_sub = {}
+    for record in sampled:
+        by_sub.setdefault(record["subreddit"], []).append(record)
+    assert all(len(group) == 5 for group in by_sub.values())
+
+
+def test_inverse_frequency_oversamples_rare_terms():
+    from pushshiftreader import Sampler
+
+    records = _synthetic_records()
+    sampled = Sampler("inverse_frequency", n=10, seed=7).sample(records)
+    rare_share = sum(1 for r in sampled if r["matched_terms"] == "rare") / len(sampled)
+    population_share = 6 / 60
+    assert rare_share > population_share  # rare term oversampled
+
+    again = Sampler("inverse_frequency", n=10, seed=7).sample(records)
+    assert [r["id"] for r in sampled] == [r["id"] for r in again]
+
+
+def test_first_appearance_returns_earliest_for_term():
+    from pushshiftreader import Sampler
+
+    sampled = Sampler("first_appearance", n=3, term="rare").sample(_synthetic_records())
+    assert [r["id"] for r in sampled] == ["r000", "r030", "r010"] or [
+        r["created_utc"] for r in sampled
+    ] == sorted(r["created_utc"] for r in sampled)
+    assert all(r["matched_terms"] == "rare" for r in sampled)
+    assert len(sampled) == 3
+
+
+def test_sampler_run_emits_manifest(tmp_path):
+    from pushshiftreader import Sampler
+    from pushshiftreader.sampling import load_records
+
+    records = _synthetic_records()
+    input_path = tmp_path / "records.jsonl"
+    with open(input_path, "w", encoding="utf-8") as handle:
+        for record in records:
+            handle.write(json.dumps(record) + "\n")
+
+    result = Sampler("random", n=5, seed=3).run(input_paths=[input_path])
+    out_path = result.write(tmp_path / "sample_out")
+
+    assert len(result.records) == 5
+    manifest = read_json(tmp_path / "sample_out" / "manifest.json")
+    assert manifest["operation"] == "sample"
+    assert manifest["seed"] == 3
+    assert manifest["counts"] == {"input_records": 60, "sampled": 5}
+    assert manifest["inputs"][0]["hash_kind"] == "sha256"
+    assert load_records(out_path)
+
+
+# ---- emergence ---------------------------------------------------------------
+
+
+def test_detect_emergence_flags_burst_and_zero_fills():
+    from pushshiftreader import build_term_series, detect_emergence
+
+    rows = []
+    # "steady" hums along at 5/month for 12 months of 2020
+    for month in range(1, 13):
+        rows.append(
+            {"month": f"2020-{month:02d}", "term": "steady", "matched_records": 5}
+        )
+    # "burst" is absent until a spike in 2020-10 (rows for missing months omitted)
+    rows.append({"month": "2020-10", "term": "burst", "matched_records": 40})
+
+    series = build_term_series(rows)
+    assert len(series["burst"]) == 12  # zero-filled across the observed span
+    assert dict(series["burst"])["2020-03"] == 0
+
+    points = detect_emergence(series, window=6, threshold=3.0, min_count=5)
+    assert [point.term for point in points] == ["burst"]
+    point = points[0]
+    assert point.month == "2020-10"
+    assert point.first_month == "2020-10"
+    assert point.zscore >= 3.0
+
+
+def test_run_emergence_over_tracking_run(tmp_path):
+    from pushshiftreader import run_emergence
+
+    corpus = _extracted_corpus(tmp_path)
+    tracking_root = tmp_path / "tracking"
+    KeywordTracker(
+        dataset_path=corpus,
+        output_path=tracking_root,
+        keyword_sets=[KeywordSet(name="climate", terms=["climate", "carbon"])],
+    ).run()
+
+    result = run_emergence(tracking_root, window=1, threshold=0.5, min_count=1)
+    assert result.manifest.operation == "emergence"
+    assert result.manifest.counts["terms"] >= 1
+    out = result.write(tmp_path / "emergence_out")
+    assert read_json(out)["terms"]
+
+
+def test_cli_sample_and_emergence(tmp_path, monkeypatch, capsys):
+    corpus = _extracted_corpus(tmp_path)
+    tracking_root = tmp_path / "tracking"
+    KeywordTracker(
+        dataset_path=corpus,
+        output_path=tracking_root,
+        keyword_sets=[KeywordSet(name="climate", terms=["climate"])],
+    ).run()
+
+    sample_out = tmp_path / "sample_cli"
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "pushshiftreader", "sample",
+            str(tracking_root / "matches"),
+            "--output", str(sample_out),
+            "--strategy", "first_appearance",
+            "--n", "2",
+        ],
+    )
+    cli_main()
+    assert "Sampling complete" in capsys.readouterr().out
+    assert (sample_out / "sample.jsonl").exists()
+    assert read_json(sample_out / "manifest.json")["params"]["strategy"] == "first_appearance"
+
+    emergence_out = tmp_path / "emergence_cli"
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "pushshiftreader", "emergence",
+            str(tracking_root),
+            "--output", str(emergence_out),
+            "--window", "1",
+            "--threshold", "0.5",
+            "--min-count", "1",
+        ],
+    )
+    cli_main()
+    assert "Emergence detection complete" in capsys.readouterr().out
+    assert (emergence_out / "emergence.json").exists()

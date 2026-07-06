@@ -23,6 +23,8 @@ from .reddit_api import (
     RedditCommentFetcher,
     RedditSubmissionScraper,
 )
+from .emergence import run_emergence
+from .sampling import STRATEGIES, Sampler
 from .selection import Selector, SubredditSliceSpec, ThreadSpec, TurnSpec
 from .signals import RegexDetector, SignalDetector
 from .tracking import KeywordSet, KeywordTracker, load_keyword_sets, merge_keyword_sets
@@ -204,6 +206,46 @@ def cmd_slice(args) -> None:
     print(f"  Epochs:             {len(result.epochs)}")
     print(f"  Rows written:       {sum(result.rows_written.values()):,}")
     print(f"  Output root:        {result.output_root}")
+
+
+def cmd_sample(args) -> None:
+    sampler = Sampler(
+        strategy=args.strategy,
+        n=args.n,
+        seed=args.seed,
+        granularity=args.granularity,
+        per_stratum=args.per_stratum,
+        term_field=args.term_field,
+        term=args.term,
+    )
+    result = sampler.run(input_paths=args.input)
+    records_path = result.write(args.output)
+    print("\nSampling complete")
+    print(f"  Strategy:           {args.strategy}")
+    print(f"  Seed:               {args.seed}")
+    print(f"  Input records:      {result.manifest.counts['input_records']:,}")
+    print(f"  Sampled:            {len(result.records):,}")
+    print(f"  Output:             {records_path}")
+
+
+def cmd_emergence(args) -> None:
+    result = run_emergence(
+        tracking_root=args.tracking,
+        window=args.window,
+        threshold=args.threshold,
+        min_count=args.min_count,
+        keyword_set=args.keyword_set,
+    )
+    points_path = result.write(args.output)
+    print("\nEmergence detection complete")
+    print(f"  Terms analysed:     {result.manifest.counts['terms']}")
+    print(f"  Inflections found:  {len(result.points)}")
+    print(f"  Output:             {points_path}")
+    for point in result.points[: args.top_n]:
+        print(
+            f"    {point.term!r} @ {point.month}: {point.count} "
+            f"(z={point.zscore}, first seen {point.first_month})"
+        )
 
 
 def cmd_track(args) -> None:
@@ -534,6 +576,26 @@ def main() -> None:
     slice_parser.add_argument("--end-month")
     slice_parser.add_argument("--force", action="store_true")
 
+    sample_parser = subparsers.add_parser("sample", help="Run a seeded sampling strategy over records (+ manifest)")
+    sample_parser.add_argument("input", nargs="+", type=Path, help="Record files or directories (parquet/jsonl/csv)")
+    sample_parser.add_argument("--output", "-o", type=Path, required=True)
+    sample_parser.add_argument("--strategy", choices=list(STRATEGIES), default="random")
+    sample_parser.add_argument("--n", type=int, default=100, help="Total sample size")
+    sample_parser.add_argument("--seed", type=int, help="RNG seed for reproducibility")
+    sample_parser.add_argument("--granularity", choices=list(GRANULARITIES), default="month")
+    sample_parser.add_argument("--per-stratum", type=int, help="Per-stratum draw for stratified strategies")
+    sample_parser.add_argument("--term-field", default="matched_terms")
+    sample_parser.add_argument("--term", help="Restrict inverse_frequency/first_appearance to one term")
+
+    emergence_parser = subparsers.add_parser("emergence", help="Detect inflection terms from a tracking run")
+    emergence_parser.add_argument("tracking", type=Path, help="Keyword-tracking run root")
+    emergence_parser.add_argument("--output", "-o", type=Path, required=True)
+    emergence_parser.add_argument("--window", type=int, default=6, help="Trailing baseline window (months)")
+    emergence_parser.add_argument("--threshold", type=float, default=3.0, help="Z-score threshold")
+    emergence_parser.add_argument("--min-count", type=int, default=5)
+    emergence_parser.add_argument("--keyword-set", help="Restrict to one keyword set")
+    emergence_parser.add_argument("--top-n", type=int, default=10, help="Inflections to print")
+
     catalogue_parser = subparsers.add_parser("catalogue", help="Build archive-wide subreddit/month summary tables")
     catalogue_parser.add_argument("--archive", "-a", type=Path, required=True)
     catalogue_parser.add_argument("--output", "-o", type=Path, required=True)
@@ -685,6 +747,10 @@ def main() -> None:
             cmd_extract_thread(args)
         elif args.command == "slice":
             cmd_slice(args)
+        elif args.command == "sample":
+            cmd_sample(args)
+        elif args.command == "emergence":
+            cmd_emergence(args)
         elif args.command == "catalogue":
             cmd_catalogue(args)
         elif args.command == "subreddit-index":
