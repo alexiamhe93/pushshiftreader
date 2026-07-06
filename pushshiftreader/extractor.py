@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Pattern, Set
 
 from .models import Comment, Submission
+from .provenance import write_manifest
 from .reader import ReadProgress, read_zst_records
 from .storage import (
     AUTHOR_MONTH_SCHEMA,
@@ -482,6 +483,28 @@ class SubredditExtractor:
             self._write_dataset_metadata(subreddit)
 
         duration = time.time() - started
+
+        for subreddit in self.subreddits:
+            sub_stats = [stats for stats in all_stats if stats.subreddit == subreddit]
+            write_manifest(
+                self._dataset_root(subreddit),
+                operation="extract",
+                params={
+                    "subreddit": subreddit,
+                    "start_month": start_month,
+                    "end_month": end_month,
+                    "include_patterns": [pattern.pattern for pattern in self._include_patterns],
+                    "exclude_patterns": [pattern.pattern for pattern in self._exclude_patterns],
+                },
+                input_paths=[archive.path for archive in archives],
+                outputs=[self._dataset_root(subreddit)],
+                counts={
+                    "months_processed": len(sub_stats),
+                    "submissions": sum(stats.submissions_count for stats in sub_stats),
+                    "comments": sum(stats.comments_count for stats in sub_stats),
+                },
+                duration_seconds=round(duration, 3),
+            )
         logger.info(
             "Extraction complete: %s months, %s submissions, %s comments in %s",
             months_processed,

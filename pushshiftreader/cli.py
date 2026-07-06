@@ -23,10 +23,12 @@ from .reddit_api import (
     RedditCommentFetcher,
     RedditSubmissionScraper,
 )
+from .selection import Selector, SubredditSliceSpec, ThreadSpec, TurnSpec
 from .signals import RegexDetector, SignalDetector
 from .tracking import KeywordSet, KeywordTracker, load_keyword_sets, merge_keyword_sets
 from .trees import TreeBuilder
 from .utils import discover_archives, format_size, setup_logging
+from .windows import GRANULARITIES, TimeWindow, slice_corpus
 
 
 def _parse_named_values(items: List[str]) -> Dict[str, List[str]]:
@@ -154,6 +156,54 @@ def cmd_extract(args) -> None:
     print(f"  Total submissions:  {result.total_submissions:,}")
     print(f"  Total comments:     {result.total_comments:,}")
     print(f"  Output root:        {args.output}")
+
+
+def _selector_from_args(args) -> Selector:
+    return Selector(
+        corpus_root=args.corpus,
+        archive_path=args.archive,
+    )
+
+
+def cmd_extract_turn(args) -> None:
+    selector = _selector_from_args(args)
+    selection = selector.resolve(TurnSpec(record_id=args.id, record_type=args.record_type))
+    records_path = selection.write(args.output)
+    print("\nTurn extraction complete")
+    print(f"  Records found:      {len(selection.records)}")
+    print(f"  Output:             {records_path}")
+    if not selection.records:
+        sys.exit(2)
+
+
+def cmd_extract_thread(args) -> None:
+    selector = _selector_from_args(args)
+    selection = selector.resolve(ThreadSpec(submission_id=args.id))
+    records_path = selection.write(args.output)
+    print("\nThread extraction complete")
+    print(f"  Records found:      {len(selection.records)}")
+    print(f"  Comments:           {selection.manifest.counts.get('comments', 0)}")
+    print(f"  Output:             {records_path}")
+    if not selection.records:
+        sys.exit(2)
+
+
+def cmd_slice(args) -> None:
+    window = None
+    if args.start_month or args.end_month:
+        window = TimeWindow.from_months(args.start_month, args.end_month)
+    result = slice_corpus(
+        corpus_root=args.corpus,
+        granularity=args.granularity,
+        output_root=args.output,
+        window=window,
+        force=args.force,
+    )
+    print("\nSlicing complete")
+    print(f"  Granularity:        {result.granularity}")
+    print(f"  Epochs:             {len(result.epochs)}")
+    print(f"  Rows written:       {sum(result.rows_written.values()):,}")
+    print(f"  Output root:        {result.output_root}")
 
 
 def cmd_track(args) -> None:
@@ -463,6 +513,27 @@ def main() -> None:
     extract_parser.add_argument("--workers", "-w", type=int, default=1)
     extract_parser.add_argument("--progress-interval", type=int, default=250000)
 
+    turn_parser = subparsers.add_parser("extract-turn", help="Pull a single comment/submission by id (+ manifest)")
+    turn_parser.add_argument("id", help="Record id (without t1_/t3_ prefix)")
+    turn_parser.add_argument("--corpus", "-c", type=Path, help="Extracted subreddit corpus root")
+    turn_parser.add_argument("--archive", "-a", type=Path, help="Raw archive root (fallback source)")
+    turn_parser.add_argument("--output", "-o", type=Path, required=True)
+    turn_parser.add_argument("--record-type", choices=["comment", "submission"])
+
+    thread_parser = subparsers.add_parser("extract-thread", help="Pull one submission + full comment tree (+ manifest)")
+    thread_parser.add_argument("id", help="Submission id (without t3_ prefix)")
+    thread_parser.add_argument("--corpus", "-c", type=Path, help="Extracted subreddit corpus root")
+    thread_parser.add_argument("--archive", "-a", type=Path, help="Raw archive root (fallback source)")
+    thread_parser.add_argument("--output", "-o", type=Path, required=True)
+
+    slice_parser = subparsers.add_parser("slice", help="Window a corpus into per-epoch Parquet slices")
+    slice_parser.add_argument("corpus", type=Path, help="Extracted subreddit corpus root")
+    slice_parser.add_argument("--granularity", "-g", choices=list(GRANULARITIES), default="month")
+    slice_parser.add_argument("--output", "-o", type=Path, help="Defaults to <corpus>/slices/<granularity>")
+    slice_parser.add_argument("--start-month")
+    slice_parser.add_argument("--end-month")
+    slice_parser.add_argument("--force", action="store_true")
+
     catalogue_parser = subparsers.add_parser("catalogue", help="Build archive-wide subreddit/month summary tables")
     catalogue_parser.add_argument("--archive", "-a", type=Path, required=True)
     catalogue_parser.add_argument("--output", "-o", type=Path, required=True)
@@ -608,6 +679,12 @@ def main() -> None:
     try:
         if args.command == "extract":
             cmd_extract(args)
+        elif args.command == "extract-turn":
+            cmd_extract_turn(args)
+        elif args.command == "extract-thread":
+            cmd_extract_thread(args)
+        elif args.command == "slice":
+            cmd_slice(args)
         elif args.command == "catalogue":
             cmd_catalogue(args)
         elif args.command == "subreddit-index":

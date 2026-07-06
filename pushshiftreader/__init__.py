@@ -22,6 +22,9 @@ from .loader import (
     load_subreddit,
 )
 from .models import Comment, CommentNode, Submission, Thread
+from .provenance import Manifest, fingerprint_file, manifest_run, write_manifest
+from .selection import Selection, Selector, SubredditSliceSpec, ThreadSpec, TurnSpec
+from .windows import GRANULARITIES, TimeWindow, epoch_of, month_to_epoch, slice_corpus
 from .presets import (
     AITAVerdictDetector,
     AuthorDeletedDetector,
@@ -46,6 +49,7 @@ from .reddit_api import (
     normalize_submission,
 )
 from .reader import ReadProgress, ZstReader, count_records, read_zst_lines, read_zst_records
+from .searcher import SearchResult, SearchStats, WordSearcher, assemble_search_results
 from .signals import AuthorIsOPDetector, Detector, RegexDetector, ScoreDetector, SignalDetector
 from .storage import (
     COMMENT_FIELDS,
@@ -92,8 +96,16 @@ __all__ = [
     "DreamSubredditDiscoverer",
     "ExtractionResult",
     "ExtractionStats",
+    "GRANULARITIES",
     "KeywordSet",
     "KeywordTracker",
+    "Manifest",
+    "Selection",
+    "Selector",
+    "SubredditSliceSpec",
+    "ThreadSpec",
+    "TimeWindow",
+    "TurnSpec",
     "ModDistinguishedDetector",
     "ReadProgress",
     "RedditAPICredentials",
@@ -103,7 +115,11 @@ __all__ = [
     "RedditSubmissionScraper",
     "RegexDetector",
     "ScoreDetector",
+    "SearchResult",
+    "SearchStats",
     "SignalDetector",
+    "WordSearcher",
+    "assemble_search_results",
     "Submission",
     "StickiedCommentDetector",
     "SubredditData",
@@ -124,6 +140,12 @@ __all__ = [
     "SUBMISSION_SCHEMA",
     "count_records",
     "discover_archives",
+    "epoch_of",
+    "fingerprint_file",
+    "manifest_run",
+    "month_to_epoch",
+    "slice_corpus",
+    "write_manifest",
     "load_keyword_sets",
     "get_detectors",
     "load_corpus",

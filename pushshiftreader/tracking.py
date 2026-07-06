@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Pattern, Tuple
 
 from .models import Comment, Submission
+from .provenance import write_manifest
 from .storage import (
     COMMENT_FIELD_SPECS,
     MATCH_COMMENT_SCHEMA,
@@ -389,6 +390,33 @@ class KeywordTracker:
                 ],
                 "completed_at": timestamp_str(),
             },
+        )
+
+        write_manifest(
+            self.output_path,
+            operation="track",
+            params={
+                "dataset_path": str(self.dataset_path),
+                "start_month": start_month,
+                "end_month": end_month,
+                "keyword_sets": [item.to_dict() for item in self.keyword_sets],
+            },
+            input_paths=[
+                path
+                for month in months
+                for path in (
+                    self.dataset_path / "comments" / f"{month}.parquet",
+                    self.dataset_path / "submissions" / f"{month}.parquet",
+                )
+                if path.exists()
+            ],
+            outputs=[self.output_path],
+            counts={
+                "months_processed": len(stats),
+                "comments_matched": total_comments,
+                "submissions_matched": total_submissions,
+            },
+            duration_seconds=round(duration, 3),
         )
 
         logger.info(

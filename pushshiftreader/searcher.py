@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Tuple
 
+from .provenance import write_manifest
 from .reader import read_zst_lines, ReadProgress
 from .writers import JsonlWriter, CsvWriter, SUBMISSION_CSV_FIELDS, COMMENT_CSV_FIELDS
 from .utils import (
@@ -351,9 +352,33 @@ class WordSearcher:
             )
 
         if self.workers != 1:
-            return self._run_parallel(archives)
+            result = self._run_parallel(archives)
+        else:
+            result = self._run_sequential(archives)
 
-        return self._run_sequential(archives)
+        write_manifest(
+            self.output_path,
+            operation="search",
+            params={
+                "backend": "keyword",
+                "pattern": self.pattern,
+                "case_sensitive": self.case_sensitive,
+                "search_comments": self.search_comments,
+                "search_submissions": self.search_submissions,
+                "output_format": self.output_format,
+                "start_month": start_month,
+                "end_month": end_month,
+            },
+            input_paths=[archive.path for archive in archives],
+            outputs=[self.output_path],
+            counts={
+                "months_processed": result.months_processed,
+                "comments_matched": result.total_comments,
+                "submissions_matched": result.total_submissions,
+            },
+            duration_seconds=round(result.duration_seconds, 3),
+        )
+        return result
 
     def _run_sequential(self, archives: List[ArchiveFile]) -> SearchResult:
         start_time = time.time()
