@@ -58,13 +58,25 @@ class SampleResult:
 
 
 def _record_terms(record: Dict[str, Any], term_field: str) -> List[str]:
-    """Matched terms for a record; tracking outputs store them pipe-joined."""
+    """
+    Matched terms for a record. Tracking outputs store them as a JSON-encoded
+    list (e.g. ``'["autism", "stimming"]'``); plain lists and pipe/comma-joined
+    strings are accepted too.
+    """
     raw = record.get(term_field)
     if raw is None:
         return []
     if isinstance(raw, (list, tuple)):
         return [str(term) for term in raw]
-    return [term for term in str(raw).replace("|", ",").split(",") if term.strip()]
+    text = str(raw).strip()
+    if text.startswith("["):
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, list):
+                return [str(term) for term in parsed]
+        except json.JSONDecodeError:
+            pass
+    return [term.strip() for term in text.replace("|", ",").split(",") if term.strip()]
 
 
 class Sampler:

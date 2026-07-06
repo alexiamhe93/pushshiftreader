@@ -435,10 +435,71 @@ report = build_smoke_report(
 print(report["monthly_summary"])
 ```
 
+## Research Integration Layer
+
+The package doubles as a **data-sampling substrate** for diachronic social-science
+studies (e.g. concept drift on Reddit). It does not solve the measurement problems
+(drift detection, embedding anachronism); its job is to make every sampling decision
+explicit, reproducible, reversible, and multi-scale. See `RESEARCH_INTEGRATION_PLAN.md`
+for the design rationale.
+
+**Design commitments**
+
+1. *Keyword is the concept-neutral floor.* Keyword/regex match defines candidate-pool
+   membership; semantic search only sub-classifies within a pool (enforced by
+   construction: the semantic backend accepts record pools, never raw archives).
+2. *Provenance is non-negotiable.* Every extraction, search, tracking run, slice, and
+   sample emits a `manifest.json`: input fingerprints, operation, params, seed,
+   model + version, run timestamp, outputs, counts.
+3. *Multi-scale by design.* One resolver handles a single turn, a full thread, or a
+   windowed subreddit slice.
+4. *Novelty is a sampling problem.* Inverse-frequency, first-appearance, and
+   change-point-driven sampling are the entry points to rare emergent usage.
+5. *Time is a first-class axis.* Per-epoch Parquet slices feed diachronic analysis.
+
+**Workflow sketch (emergent-sense loop)**
+
+```bash
+# 1. Extract and track
+pushshiftreader extract -a /data/dumps -o extracted -s autism
+pushshiftreader track extracted/autism -o tracking --term-set "autism_terms=autism,stimming"
+
+# 2. Detect terms whose usage inflects
+pushshiftreader emergence tracking -o emergence_out --window 6 --threshold 3.0
+
+# 3. Pull the earliest instances of an inflecting term (seeded, manifested)
+pushshiftreader sample tracking/matches -o sample_out \
+    --strategy first_appearance --term stimming --n 50 --seed 42
+
+# 4. Slice for per-epoch analysis, index vocabularies
+pushshiftreader slice extracted/autism --granularity quarter
+pushshiftreader epoch-index extracted/autism/slices/quarter
+```
+
+**Semantic search (optional extra)**
+
+```bash
+pip install -e ".[semantic]"   # numpy + gensim
+```
+
+DDR-style retrieval (Garten et al. 2018) over per-epoch static vectors: train
+period-native vectors per slice (`train_epoch_model`), search each epoch with its
+own model and its own seed sets (`search_epochs`), and every hit is tagged with its
+nearest seed plus per-seed scores — anachronism becomes a measurement, not a bias.
+Diachronic alignment (Procrustes) stays downstream; `export_alignment_bundle` emits
+token-aligned per-epoch vector matrices ready for it.
+
 ## CLI Reference
 
 ```text
 pushshiftreader extract
+pushshiftreader extract-turn
+pushshiftreader extract-thread
+pushshiftreader slice
+pushshiftreader epoch-index
+pushshiftreader search
+pushshiftreader sample
+pushshiftreader emergence
 pushshiftreader catalogue
 pushshiftreader subreddit-index
 pushshiftreader track

@@ -21,6 +21,7 @@ from .loader import (
     load_corpus,
     load_subreddit,
 )
+from .diachronic import build_epoch_index, export_alignment_bundle
 from .emergence import (
     EmergencePoint,
     EmergenceResult,
@@ -174,8 +175,10 @@ __all__ = [
     "SUBMISSION_SCHEMA",
     "count_records",
     "discover_archives",
+    "build_epoch_index",
     "build_term_series",
     "detect_emergence",
+    "export_alignment_bundle",
     "epoch_of",
     "fingerprint_file",
     "load_records",

@@ -637,3 +637,84 @@ def test_cli_search_keyword_backend(tmp_path, monkeypatch, capsys):
     output = capsys.readouterr().out
     assert "Keyword search complete" in output
     assert read_json(out_root / "manifest.json")["params"]["backend"] == "keyword"
+
+
+# ---- diachronic glue -----------------------------------------------------------
+
+
+def test_build_epoch_index_over_slices(tmp_path):
+    from pushshiftreader import build_epoch_index
+
+    corpus = _extracted_corpus(tmp_path)
+    result = slice_corpus(corpus, granularity="month")
+
+    vocab_paths = build_epoch_index(result.output_root, min_count=1)
+    assert set(vocab_paths) == {"2020-01", "2020-02"}
+
+    jan_rows = {row["token"]: row for row in read_parquet_records(vocab_paths["2020-01"])}
+    assert jan_rows["climate"]["count"] == 3  # title, selftext, c1 body
+    assert jan_rows["climate"]["doc_count"] == 2  # submission text + one comment
+    assert "carbon" not in jan_rows
+    feb_rows = {row["token"]: row for row in read_parquet_records(vocab_paths["2020-02"])}
+    assert feb_rows["carbon"]["count"] == 2
+
+    manifest = read_json(result.output_root / "index" / "manifest.json")
+    assert manifest["operation"] == "epoch-index"
+    assert manifest["params"]["tokenizer"] == "lowercase_alnum_v1"
+
+
+def test_export_alignment_bundle_restricts_to_shared_vocab(tmp_path):
+    from pushshiftreader import export_alignment_bundle
+
+    _, model, _ = _semantic_fixture()
+    vocab_by_epoch = {
+        "2020-01": ["asperger", "clinical", "diagnosis", "identity"],
+        "2020-02": ["asperger", "identity", "community", "notinmodel"],
+    }
+    out = export_alignment_bundle(
+        models_by_epoch={"2020-01": model, "2020-02": model},
+        vocab_by_epoch=vocab_by_epoch,
+        output_root=tmp_path / "bundle",
+    )
+
+    common = read_json(out / "common_vocab.json")
+    assert common["tokens"] == ["asperger", "identity"]
+
+    jan = read_parquet_records(out / "2020-01" / "vectors.parquet")
+    feb = read_parquet_records(out / "2020-02" / "vectors.parquet")
+    assert [row["token"] for row in jan] == ["asperger", "identity"]
+    assert [row["token"] for row in jan] == [row["token"] for row in feb]  # token-aligned
+    assert len(jan[0]["vector"]) == 8
+
+    manifest = read_json(out / "manifest.json")
+    assert manifest["operation"] == "alignment-bundle"
+    assert manifest["params"]["models"]["2020-01"]["name"] == "fake-vectors"
+    assert manifest["counts"] == {"epochs": 2, "common_vocab": 2}
+
+
+def test_cli_epoch_index(tmp_path, monkeypatch, capsys):
+    corpus = _extracted_corpus(tmp_path)
+    result = slice_corpus(corpus, granularity="year")
+
+    monkeypatch.setattr(
+        "sys.argv",
+        ["pushshiftreader", "epoch-index", str(result.output_root)],
+    )
+    cli_main()
+    assert "Epoch indexing complete" in capsys.readouterr().out
+    assert (result.output_root / "index" / "2020" / "vocab.parquet").exists()
+
+
+def test_record_terms_parses_tracking_json_format():
+    """Tracking stores matched_terms as a JSON-encoded list — the emergence →
+    first_appearance loop depends on parsing it (regression: e2e run drew 0)."""
+    from pushshiftreader.sampling import _record_terms
+
+    assert _record_terms({"matched_terms": '["autism", "stimming"]'}, "matched_terms") == [
+        "autism",
+        "stimming",
+    ]
+    assert _record_terms({"matched_terms": ["a", "b"]}, "matched_terms") == ["a", "b"]
+    assert _record_terms({"matched_terms": "a|b"}, "matched_terms") == ["a", "b"]
+    assert _record_terms({"matched_terms": "plain"}, "matched_terms") == ["plain"]
+    assert _record_terms({}, "matched_terms") == []

@@ -24,6 +24,7 @@ from .reddit_api import (
     RedditCommentFetcher,
     RedditSubmissionScraper,
 )
+from .diachronic import build_epoch_index
 from .emergence import run_emergence
 from .sampling import STRATEGIES, Sampler, load_records
 from .search import WordSearcher
@@ -208,6 +209,18 @@ def cmd_slice(args) -> None:
     print(f"  Epochs:             {len(result.epochs)}")
     print(f"  Rows written:       {sum(result.rows_written.values()):,}")
     print(f"  Output root:        {result.output_root}")
+
+
+def cmd_epoch_index(args) -> None:
+    vocab_paths = build_epoch_index(
+        slices_root=args.slices,
+        output_root=args.output,
+        min_count=args.min_count,
+    )
+    print("\nEpoch indexing complete")
+    print(f"  Epochs indexed:     {len(vocab_paths)}")
+    for epoch, path in sorted(vocab_paths.items()):
+        print(f"    {epoch}: {path}")
 
 
 def cmd_search(args) -> None:
@@ -637,6 +650,11 @@ def main() -> None:
     slice_parser.add_argument("--end-month")
     slice_parser.add_argument("--force", action="store_true")
 
+    epoch_index_parser = subparsers.add_parser("epoch-index", help="Build per-epoch token frequency indexes over slices")
+    epoch_index_parser.add_argument("slices", type=Path, help="Slices root produced by the slice command")
+    epoch_index_parser.add_argument("--output", "-o", type=Path, help="Defaults to <slices>/index")
+    epoch_index_parser.add_argument("--min-count", type=int, default=1)
+
     search_parser = subparsers.add_parser("search", help="Search archives (keyword) or a record pool (semantic)")
     search_parser.add_argument("--backend", choices=["keyword", "semantic"], default="keyword")
     search_parser.add_argument("--output", "-o", type=Path, required=True)
@@ -828,6 +846,8 @@ def main() -> None:
             cmd_extract_thread(args)
         elif args.command == "slice":
             cmd_slice(args)
+        elif args.command == "epoch-index":
+            cmd_epoch_index(args)
         elif args.command == "search":
             cmd_search(args)
         elif args.command == "sample":
